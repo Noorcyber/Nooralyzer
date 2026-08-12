@@ -1,3 +1,316 @@
+
+Monday 8:09 PM
+
+Pasted text(1).txt
+Document
+help me run this :The steps to run newt manually are:
+ RLY to the Access Point 
+ Check your current path and folder contents via pwd & ls
+ Open a text editor via vi newt.sh 
+ Enter interactive mode by pressing i 
+ Copy the full text of newt
+ Paste into vi
+ Save in via esc then   Type :wq
+ Make the script executable via chmod +x newt.sh
+ run newt via ./newt.sh. 
+
+Yesterday 9:07 PM
+2b579904-3439-45e0-9b51-f9bfc004fffc.png
+
+ng7newt (1).sh
+File
+ok dont worry about that, i want to create my own tool, same function as newt tht i can have the code in github and just have the code there and just run curl to call it. Current features:
+
+Basic system info
+Checks and reports wired link status and speed
+Reports interface info
+Reports IP info
+Reports radio busy time
+Reports client counts and details
+Reports status of important/problematic processes
+Checks logs for certain known bad conditions
+Checks state of access point for certain known issues. example output screenshot
+
+Generated image: Nooralyazer Terminal Diagnostic Banner
+
+
+Edit
+
+
+7d624e67-d340-4cbe-83f9-c3dd4255329e.png
+thats not correct, make it exactly like this but copylble
+
+Today 1:30 PM
+959f0fc0-bec7-4332-9839-035cd5f8ba37.png
+can we make this more modren? like the way it present info?
+
+3a0ea758-e0fe-4a86-a66d-f1e235aed0af.png
+451811a5-6b76-4dbe-9fac-fc2e2939b5a7.png
+with the last update i dont see the busy time with its color difrence like in the screenshot for the first version, also the current versions screenshot for refrence
+
+Yes — I see the regression. The Radio Busy Time section is still there, but the newer version lost the per-value color logic that made the original output much easier to read.
+
+The first version had the right idea:
+
+🟢 OK = green
+
+🟡 ELEVATED = yellow/orange
+
+🔴 HIGH = red
+
+And importantly, the BUSY percentage itself should have the same color as the status, not just the status column.
+
+Replace the current Radio Busy Time section with this
+This is ash/OpenWrt-friendly and doesn't require tput or any additional packages:
+
+# ============================================================
+# RADIO BUSY TIME
+# ============================================================
+
+radio_busy_time() {
+
+    printf '\n'
+    section "RADIO BUSY TIME"
+
+    printf '%-10s %-12s %-10s %-10s %-10s %s\n' \
+        "PHY" "IF" "CHANNEL" "WIDTH" "BUSY" "STATUS"
+
+    # Colors
+    C_GREEN='\033[0;32m'
+    C_YELLOW='\033[1;33m'
+    C_RED='\033[0;31m'
+    C_RESET='\033[0m'
+
+    for phy in /sys/class/ieee80211/phy*; do
+
+        [ -d "$phy" ] || continue
+
+        PHY_NAME="$(basename "$phy")"
+
+        # Find the first wireless interface belonging to this PHY
+        IFACE=""
+
+        for netdev in "$phy"/device/net/*; do
+            if [ -e "$netdev" ]; then
+                IFACE="$(basename "$netdev")"
+                break
+            fi
+        done
+
+        [ -n "$IFACE" ] || IFACE="N/A"
+
+        CHANNEL="N/A"
+        WIDTH="N/A"
+        BUSY="N/A"
+        STATUS="UNKNOWN"
+
+        # Find survey interface
+        SURVEY_IF="$IFACE"
+
+        # Get channel information
+        if command -v iw >/dev/null 2>&1 && [ "$IFACE" != "N/A" ]; then
+
+            CH_INFO="$(iw dev "$IFACE" info 2>/dev/null)"
+
+            CHANNEL="$(printf '%s\n' "$CH_INFO" |
+                awk '/channel/ {gsub(/[()]/,"",$2); print $2; exit}')"
+
+            WIDTH="$(printf '%s\n' "$CH_INFO" |
+                awk '/width:/ {print $2; exit}')"
+
+            [ -n "$CHANNEL" ] || CHANNEL="N/A"
+            [ -n "$WIDTH" ] || WIDTH="N/A"
+
+            # Radio survey data
+            SURVEY="$(iw dev "$IFACE" survey dump 2>/dev/null)"
+
+            BUSY_RAW="$(printf '%s\n' "$SURVEY" |
+                awk '/channel active time:/ {
+                    active=$NF
+                }
+                /channel busy time:/ {
+                    busy=$NF
+                    if (active > 0)
+                        printf "%d\n", (busy * 100 / active)
+                    exit
+                }')"
+
+            if [ -n "$BUSY_RAW" ]; then
+                BUSY="$BUSY_RAW%"
+            fi
+        fi
+
+        # Determine health
+        if [ "$BUSY" != "N/A" ]; then
+
+            BUSY_NUM="${BUSY%%%}"
+
+            if [ "$BUSY_NUM" -ge 70 ] 2>/dev/null; then
+                STATUS="HIGH"
+                COLOR="$C_RED"
+
+            elif [ "$BUSY_NUM" -ge 30 ] 2>/dev/null; then
+                STATUS="ELEVATED"
+                COLOR="$C_YELLOW"
+
+            else
+                STATUS="OK"
+                COLOR="$C_GREEN"
+            fi
+
+        else
+            COLOR="$C_YELLOW"
+        fi
+
+        printf '%-10s %-12s %-10s %-10s ' \
+            "$PHY_NAME" "$IFACE" "$CHANNEL" "$WIDTH"
+
+        printf '%b%-10s%b' \
+            "$COLOR" "$BUSY" "$C_RESET"
+
+        printf '%b%s%b\n' \
+            "$COLOR" "$STATUS" "$C_RESET"
+
+    done
+}
+But there's one thing I'd change from the old version
+Your current AP840/A62 output shows:
+
+PHY        IF         CHANNEL      WIDTH      BUSY
+phy2       ap2_4      1            N/A        55%
+phy1       ap1_4      132          N/A        4%
+I'd make the thresholds:
+
+0–29%     GREEN     OK
+30–69%    YELLOW    ELEVATED
+70%+      RED       HIGH
+So your exact example would render approximately:
+
+==============================================================
+RADIO BUSY TIME
+==============================================================
+PHY        IF           CHANNEL    WIDTH      BUSY       STATUS
+phy2       ap2_4        1          N/A        55%        ELEVATED
+phy1       ap1_4        132        N/A        4%         OK
+with 55% + ELEVATED yellow/orange and 4% + OK green.
+
+One more important improvement
+I would also make the Wi-Fi driver/firmware event count use the same severity system as the radio test.
+
+Your current output has:
+
+Wi-Fi driver/firmware events     1823    WARN
+That's actually a potentially important finding, but visually it's getting lost because almost everything in the current screenshot is the same orange color.
+
+I'd use:
+
+[ OK ]      green
+[ WARN ]    yellow
+[ FAIL ]    red
+[ -- ]      gray
+throughout Nooralyzer.
+
+That gives the entire tool a consistent visual language:
+
+[ OK ]       DNS resolution
+[ OK ]       HTTPS connectivity
+[ WARN ]     Radio busy time
+[ WARN ]     Wi-Fi driver events
+[ FAIL ]     Failed neighbors
+That's the direction I'd take for Nooralyzer v1.2: keep the modern layout you have now, but restore the dynamic colors so the output immediately tells the tech where the problem is.
+
+
+
+Pasted text(2).txt
+Document
+just make it easy for me, here is the full code, just integrate the radio busy time to it without changing anything else: 
+
+Worked for 8s
+Yep — I found the exact issue. The colored radio_busy_time() function is already in your code, but it is never actually called. 
+
+
+Your current execution block ends with:
+
+report_processes
+report_logs
+report_radios
+report_clients
+report_summary
+Replace ONLY that block with this:
+report_system
+report_wired
+report_ethernet_errors
+report_ip
+report_connectivity
+report_network_state
+report_management
+report_dhcp_bridge
+report_processes
+report_logs
+report_radios
+radio_busy_time
+report_clients
+report_summary
+That's it. Do not change anything else.
+
+The existing radio_busy_time() function already has the colors you wanted:
+
+Green = 0–29% / OK
+
+Yellow = 30–69% / ELEVATED
+
+Red = 70%+ / HIGH 
+
+
+So after this change you'll get:
+
++----------------------------------------------------------------------+
+| RADIO BUSY TIME                                                      |
++----------------------------------------------------------------------+
+PHY        IF           CHANNEL    WIDTH      BUSY       STATUS
+phy2       ap2_4        1          N/A        55%        ELEVATED
+phy1       ap1_4        132        N/A        4%         OK
+with 55% + ELEVATED in yellow and 4% + OK in green.
+
+The important part is simply:
+
+report_radios
+radio_busy_time
+report_clients
+Your existing report_radios section can stay exactly as-is. This avoids touching the rest of Nooralyzer.
+
+
+just give me a copyable text of the full code integrate the radio busy time to it without changing anything else:   
+
+Worked for 19s
+Absolutely. I integrated only the radio_busy_time call into your existing v1.4 code. Nothing else was changed. The full updated script is here:
+
+Download/copy the full Nooralyzer v1.4 code
+
+The only functional addition is:
+
+report_radios
+radio_busy_time
+report_clients
+So the existing colored RADIO BUSY TIME function will now actually execute. 
+
+
+The updated file contains 1,584 lines and preserves your existing code, formatting, tests, ASCII header, firmware detection, and everything else.
+
+
+Nooralyzer_v1.4_radio_busy.txt
+Document
+
+
+
+
+Ad
+
+Library
+/
+Nooralyzer_v1.4_radio_busy.txt
+
+
 #!/bin/sh
 #
 # ================================================================
@@ -1562,6 +1875,1596 @@ report_dhcp_bridge
 report_processes
 report_logs
 report_radios
+radio_busy_time
+report_clients
+report_summary
+
+# ================================================================
+# COMPLETE
+# ================================================================
+
+printf '\n'
+
+printf '%s+----------------------------------------------------------------------+%s\n' \
+    "$C_CYAN" "$C_RESET"
+
+printf '%s|                       NOORALYZER COMPLETE                         |%s\n' \
+    "$C_CYAN" "$C_RESET"
+
+printf '%s+----------------------------------------------------------------------+%s\n' \
+    "$C_CYAN" "$C_RESET"
+
+printf '\n'
+Library
+/
+Nooralyzer_v1.4_radio_busy.txt
+
+
+#!/bin/sh
+#
+# ================================================================
+# NOORALYZER v1.4
+# DNET AP Diagnostic & Troubleshooting Tool
+#
+# Read-only diagnostics for Datto/Kaseya Networking APs
+# running OpenWrt / BusyBox.
+#
+# Run:
+#   curl -fsSL https://raw.githubusercontent.com/Noorcyber/Nooralyzer/main/Nooralyzer | sh
+# ================================================================
+
+VERSION="1.4"
+TMP_BASE="/tmp/nooralyzer.$$"
+
+# ================================================================
+# COLORS
+# ================================================================
+
+if [ -t 1 ]; then
+    C_CYAN="$(printf '\033[36m')"
+    C_BLUE="$(printf '\033[34m')"
+    C_GREEN="$(printf '\033[32m')"
+    C_YELLOW="$(printf '\033[33m')"
+    C_RED="$(printf '\033[31m')"
+    C_WHITE="$(printf '\033[37m')"
+    C_DIM="$(printf '\033[2m')"
+    C_RESET="$(printf '\033[0m')"
+else
+    C_CYAN=""
+    C_BLUE=""
+    C_GREEN=""
+    C_YELLOW=""
+    C_RED=""
+    C_WHITE=""
+    C_DIM=""
+    C_RESET=""
+fi
+
+# ================================================================
+# COUNTERS
+# ================================================================
+
+ISSUES=0
+WARNINGS=0
+INFO_COUNT=0
+
+cleanup() {
+    rm -f "${TMP_BASE}"* 2>/dev/null
+}
+
+trap cleanup EXIT INT TERM
+
+# ================================================================
+# HELPERS
+# ================================================================
+
+have() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+binary_exists() {
+    command -v "$1" >/dev/null 2>&1 ||
+    [ -x "/usr/bin/$1" ] ||
+    [ -x "/usr/sbin/$1" ] ||
+    [ -x "/sbin/$1" ]
+}
+
+section() {
+    printf '\n%s+----------------------------------------------------------------------+%s\n' "$C_CYAN" "$C_RESET"
+    printf '%s| %-68s |%s\n' "$C_CYAN" "$1" "$C_RESET"
+    printf '%s+----------------------------------------------------------------------+%s\n' "$C_CYAN" "$C_RESET"
+}
+
+kv() {
+    printf '  %-25s %s\n' "$1" "$2"
+}
+
+ok() {
+    printf '%s[ OK ]%s %s\n' "$C_GREEN" "$C_RESET" "$1"
+}
+
+warn() {
+    WARNINGS=$((WARNINGS + 1))
+    printf '%s[ !! ]%s %s\n' "$C_YELLOW" "$C_RESET" "$1"
+}
+
+issue() {
+    ISSUES=$((ISSUES + 1))
+    printf '%s[FAIL]%s %s\n' "$C_RED" "$C_RESET" "$1"
+}
+
+skip() {
+    printf '%s[ -- ]%s %s\n' "$C_DIM" "$C_RESET" "$1"
+}
+
+info() {
+    INFO_COUNT=$((INFO_COUNT + 1))
+    printf '%s[INFO]%s %s\n' "$C_CYAN" "$C_RESET" "$1"
+}
+
+read_sys() {
+    FILE="$1"
+
+    if [ -r "$FILE" ]; then
+        cat "$FILE" 2>/dev/null
+    fi
+}
+
+get_hostname() {
+    hostname 2>/dev/null || echo "unknown"
+}
+
+get_model() {
+    if [ -r /tmp/sysinfo/model ]; then
+        cat /tmp/sysinfo/model 2>/dev/null
+    elif [ -r /sys/firmware/devicetree/base/model ]; then
+        tr -d '\000' < /sys/firmware/devicetree/base/model 2>/dev/null
+    else
+        echo "unknown"
+    fi
+}
+
+get_firmware() {
+
+    if [ -r /etc/fw_core_version ]; then
+        tr -d '[:space:]' < /etc/fw_core_version 2>/dev/null
+    else
+        echo "Not exposed"
+    fi
+}
+
+get_uptime() {
+    awk '{printf "%.2f hours", $1/3600}' /proc/uptime 2>/dev/null
+}
+
+get_load() {
+    awk '{print $1" "$2" "$3}' /proc/loadavg 2>/dev/null
+}
+
+get_mem_total() {
+    awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo 2>/dev/null
+}
+
+get_mem_available() {
+    awk '/^MemAvailable:/ {print $2; exit}' /proc/meminfo 2>/dev/null
+}
+
+get_ipv4() {
+    INT="$1"
+
+    if have ip; then
+        ip -4 -o addr show dev "$INT" 2>/dev/null |
+            awk '{split($4,A,"/"); print A[1]; exit}'
+    fi
+}
+
+get_mac() {
+    INT="$1"
+
+    if [ -r "/sys/class/net/$INT/address" ]; then
+        cat "/sys/class/net/$INT/address" 2>/dev/null
+    fi
+}
+
+get_carrier() {
+    read_sys "/sys/class/net/$1/carrier"
+}
+
+get_speed() {
+    read_sys "/sys/class/net/$1/speed"
+}
+
+get_duplex() {
+    read_sys "/sys/class/net/$1/duplex"
+}
+
+# ================================================================
+# SYSTEM
+# ================================================================
+
+report_system() {
+
+    section "SYSTEM HEALTH"
+
+    MEM_TOTAL="$(get_mem_total)"
+    MEM_AVAIL="$(get_mem_available)"
+
+    if [ -n "$MEM_TOTAL" ] &&
+       [ -n "$MEM_AVAIL" ] &&
+       [ "$MEM_TOTAL" -gt 0 ] 2>/dev/null
+    then
+        MEM_USED=$((MEM_TOTAL - MEM_AVAIL))
+
+        MEM_PCT="$(awk \
+            -v u="$MEM_USED" \
+            -v t="$MEM_TOTAL" \
+            'BEGIN {printf "%.0f",(u/t)*100}'
+        )"
+
+        kv "Memory" "${MEM_PCT}% used (${MEM_AVAIL} KB available)"
+    else
+        kv "Memory" "N/A"
+    fi
+
+    OVERLAY="$(df -k /overlay 2>/dev/null | tail -n 1)"
+
+    if [ -n "$OVERLAY" ]; then
+        OVERLAY_USE="$(printf '%s\n' "$OVERLAY" | awk '{print $5}')"
+        kv "Overlay" "$OVERLAY_USE used"
+    else
+        kv "Overlay" "N/A"
+    fi
+
+    if [ -r /proc/sys/net/netfilter/nf_conntrack_count ] &&
+       [ -r /proc/sys/net/netfilter/nf_conntrack_max ]
+    then
+
+        CT_COUNT="$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null)"
+        CT_MAX="$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null)"
+
+        kv "Conntrack" "$CT_COUNT / $CT_MAX"
+    else
+        kv "Conntrack" "N/A"
+    fi
+
+    kv "Hostname" "$(get_hostname)"
+    kv "Model" "$(get_model)"
+    kv "Firmware" "$(get_firmware)"
+    kv "Uptime" "$(get_uptime)"
+    kv "Load" "$(get_load)"
+
+    if [ -r /sys/class/thermal/thermal_zone0/temp ]; then
+
+        TEMP="$(awk '{printf "%.0f",$1/1000}' \
+            /sys/class/thermal/thermal_zone0/temp 2>/dev/null)"
+
+        if [ -n "$TEMP" ]; then
+
+            if [ "$TEMP" -ge 85 ] 2>/dev/null; then
+                issue "CPU temperature ${TEMP}C is HIGH"
+            elif [ "$TEMP" -ge 75 ] 2>/dev/null; then
+                warn "CPU temperature ${TEMP}C is elevated"
+            else
+                ok "CPU temperature ${TEMP}C"
+            fi
+
+        fi
+    else
+        skip "CPU temperature not exposed by this platform"
+    fi
+}
+
+# ================================================================
+# PHYSICAL ETHERNET
+# ================================================================
+
+is_physical_ethernet() {
+
+    INT="$1"
+
+    case "$INT" in
+        eth*|lan*|wan*)
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    [ -e "/sys/class/net/$INT/device" ] || return 1
+
+    [ ! -e "/sys/class/net/$INT/phy80211" ] || return 1
+
+    return 0
+}
+
+report_wired() {
+
+    section "UPLINK / ETHERNET"
+
+    printf '  %-8s %-8s %-12s %-10s %-18s %s\n' \
+        "IF" "LINK" "SPEED" "DUPLEX" "MAC" "IPv4"
+
+    printf '  %-8s %-8s %-12s %-10s %-18s %s\n' \
+        "--------" "--------" "------------" "----------" \
+        "------------------" "----------------"
+
+    FOUND=0
+
+    for D in /sys/class/net/*; do
+
+        [ -e "$D" ] || continue
+
+        INT="${D##*/}"
+
+        is_physical_ethernet "$INT" || continue
+
+        FOUND=1
+
+        CARRIER="$(get_carrier "$INT")"
+        SPEED="$(get_speed "$INT")"
+        DUPLEX="$(get_duplex "$INT")"
+        MAC="$(get_mac "$INT")"
+        IPADDR="$(get_ipv4 "$INT")"
+
+        [ -n "$MAC" ] || MAC="-"
+        [ -n "$IPADDR" ] || IPADDR="-"
+        [ -n "$DUPLEX" ] || DUPLEX="N/A"
+
+        case "$CARRIER" in
+            1) LINK="UP" ;;
+            0) LINK="DOWN" ;;
+            *) LINK="?" ;;
+        esac
+
+        case "$SPEED" in
+            ""|-1|0)
+                SPEED="N/A"
+                ;;
+            *)
+                SPEED="${SPEED} Mbps"
+                ;;
+        esac
+
+        printf '  %-8s %-8s %-12s %-10s %-18s %s\n' \
+            "$INT" "$LINK" "$SPEED" "$DUPLEX" "$MAC" "$IPADDR"
+
+        if [ "$LINK" = "UP" ]; then
+
+            case "$SPEED" in
+                "10 Mbps")
+                    issue "$INT negotiated at only 10 Mbps"
+                    ;;
+                "100 Mbps")
+                    warn "$INT negotiated at 100 Mbps"
+                    ;;
+            esac
+
+            if [ "$DUPLEX" = "half" ]; then
+                issue "$INT is running HALF duplex"
+            fi
+        fi
+    done
+
+    [ "$FOUND" -eq 1 ] ||
+        skip "No physical Ethernet interfaces detected"
+}
+
+# ================================================================
+# ETHERNET ERRORS
+# ================================================================
+
+stat_value() {
+    read_sys "/sys/class/net/$1/statistics/$2"
+}
+
+report_ethernet_errors() {
+
+    section "ETHERNET ERROR COUNTERS"
+
+    printf '  %-8s %-9s %-9s %-9s %-9s %-9s %s\n' \
+        "IF" "RX ERR" "TX ERR" "RX DROP" "TX DROP" "CARRIER" "HEALTH"
+
+    printf '  %-8s %-9s %-9s %-9s %-9s %-9s %s\n' \
+        "--------" "---------" "---------" "---------" \
+        "---------" "---------" "----------"
+
+    FOUND=0
+
+    for D in /sys/class/net/*; do
+
+        [ -e "$D" ] || continue
+
+        INT="${D##*/}"
+
+        is_physical_ethernet "$INT" || continue
+
+        FOUND=1
+
+        RXERR="$(stat_value "$INT" rx_errors)"
+        TXERR="$(stat_value "$INT" tx_errors)"
+        RXDROP="$(stat_value "$INT" rx_dropped)"
+        TXDROP="$(stat_value "$INT" tx_dropped)"
+        CARRIER="$(stat_value "$INT" carrier)"
+
+        [ -n "$RXERR" ] || RXERR=0
+        [ -n "$TXERR" ] || TXERR=0
+        [ -n "$RXDROP" ] || RXDROP=0
+        [ -n "$TXDROP" ] || TXDROP=0
+        [ -n "$CARRIER" ] || CARRIER=0
+
+        HEALTH="OK"
+
+        if [ "$RXERR" -gt 0 ] 2>/dev/null ||
+           [ "$TXERR" -gt 0 ] 2>/dev/null ||
+           [ "$CARRIER" -gt 0 ] 2>/dev/null
+        then
+            HEALTH="WARN"
+        fi
+
+        if [ "$RXERR" -gt 100 ] 2>/dev/null ||
+           [ "$TXERR" -gt 100 ] 2>/dev/null ||
+           [ "$CARRIER" -gt 20 ] 2>/dev/null
+        then
+            HEALTH="HIGH"
+        fi
+
+        printf '  %-8s %-9s %-9s %-9s %-9s %-9s %s\n' \
+            "$INT" "$RXERR" "$TXERR" "$RXDROP" "$TXDROP" "$CARRIER" "$HEALTH"
+
+        if [ "$HEALTH" = "HIGH" ]; then
+            issue "$INT has high Ethernet error/carrier counts"
+        elif [ "$HEALTH" = "WARN" ]; then
+            warn "$INT has Ethernet errors or carrier events"
+        fi
+    done
+
+    [ "$FOUND" -eq 1 ] ||
+        skip "No physical Ethernet interfaces available"
+}
+
+# ================================================================
+# INTERFACE / IP MAP
+# ================================================================
+
+report_ip() {
+
+    section "INTERFACE / IP MAP"
+
+    printf '  %-18s %-20s %s\n' \
+        "INTERFACE" "MAC" "IPv4"
+
+    printf '  %-18s %-20s %s\n' \
+        "------------------" "--------------------" "----------------"
+
+    for D in /sys/class/net/*; do
+
+        [ -e "$D" ] || continue
+
+        INT="${D##*/}"
+
+        ADDR="$(get_ipv4 "$INT")"
+
+        [ -n "$ADDR" ] || continue
+
+        printf '  %-18s %-20s %s\n' \
+            "$INT" "$(get_mac "$INT")" "$ADDR"
+    done
+}
+
+# ================================================================
+# PING
+# ================================================================
+
+ping_test() {
+
+    TARGET="$1"
+    COUNT="$2"
+
+    if ! have ping; then
+        return 2
+    fi
+
+    PING_FILE="${TMP_BASE}_ping"
+
+    ping -c "$COUNT" -W 2 "$TARGET" >"$PING_FILE" 2>&1
+
+    RC=$?
+
+    if [ "$RC" -ne 0 ]; then
+        return 1
+    fi
+
+    LOSS="$(awk -F',' '
+        /packet loss/ {
+            gsub(/%/,"",$3)
+            gsub(/ /,"",$3)
+            print $3
+            exit
+        }
+    ' "$PING_FILE" 2>/dev/null)"
+
+    LATENCY="$(awk -F'=' '
+        /round-trip|rtt/ {
+            gsub(/ /,"",$2)
+            split($2,A,"/")
+            print A[2]
+            exit
+        }
+    ' "$PING_FILE" 2>/dev/null)"
+
+    [ -n "$LOSS" ] || LOSS="0"
+    [ -n "$LATENCY" ] || LATENCY="N/A"
+
+    printf '%s|%s' "$LOSS" "$LATENCY"
+
+    return 0
+}
+
+# ================================================================
+# CONNECTIVITY
+# ================================================================
+
+get_default_gateway() {
+
+    if have ip; then
+        ip route 2>/dev/null |
+            awk '$1=="default"{print $3; exit}'
+    fi
+}
+
+report_connectivity() {
+
+    section "CONNECTIVITY HEALTH"
+
+    GATEWAY="$(get_default_gateway)"
+
+    printf '  %-25s ' "Default gateway"
+
+    if [ -n "$GATEWAY" ]; then
+        ok "$GATEWAY"
+    else
+        skip "No default gateway exposed"
+    fi
+
+    printf '  %-25s ' "Gateway reachability"
+
+    if [ -n "$GATEWAY" ] && have ping; then
+
+        RESULT="$(ping_test "$GATEWAY" 3)"
+
+        if [ $? -eq 0 ]; then
+
+            LOSS="${RESULT%%|*}"
+            LATENCY="${RESULT#*|}"
+
+            if [ "$LOSS" = "0" ] || [ "$LOSS" = "0.0" ]; then
+                ok "Reachable - ${LATENCY} ms average"
+            else
+                warn "Gateway packet loss: ${LOSS}%"
+            fi
+        else
+            warn "Gateway ICMP test failed or blocked"
+        fi
+
+    else
+        skip "Gateway test unavailable"
+    fi
+
+    printf '  %-25s ' "Internet 1.1.1.1"
+
+    if have ping; then
+
+        RESULT="$(ping_test 1.1.1.1 3)"
+
+        if [ $? -eq 0 ]; then
+
+            LOSS="${RESULT%%|*}"
+            LATENCY="${RESULT#*|}"
+
+            if [ "$LOSS" = "0" ] || [ "$LOSS" = "0.0" ]; then
+                ok "Reachable - ${LATENCY} ms average"
+            else
+                warn "Internet packet loss: ${LOSS}%"
+            fi
+        else
+            warn "Internet ICMP failed or blocked"
+        fi
+
+    else
+        skip "ping not installed"
+    fi
+
+    DNS_SERVERS=""
+
+    if [ -s /etc/resolv.conf ]; then
+
+        DNS_SERVERS="$(awk '
+            /^[[:space:]]*nameserver[[:space:]]+/ {
+                if(n++) printf ", "
+                printf $2
+            }
+        ' /etc/resolv.conf 2>/dev/null)"
+    fi
+
+    printf '  %-25s ' "DNS servers"
+
+    if [ -n "$DNS_SERVERS" ]; then
+        ok "$DNS_SERVERS"
+    else
+        warn "No nameserver configured"
+    fi
+
+    printf '  %-25s ' "DNS resolution"
+
+    if have nslookup; then
+
+        if nslookup cloudflare.com >"${TMP_BASE}_dns" 2>&1 &&
+           grep -q "Address" "${TMP_BASE}_dns"
+        then
+            ok "cloudflare.com resolved"
+        else
+            warn "DNS resolution failed"
+        fi
+
+    elif have ping; then
+
+        if ping -c 1 -W 2 cloudflare.com >/dev/null 2>&1; then
+            ok "cloudflare.com resolved"
+        else
+            warn "DNS resolution failed"
+        fi
+
+    else
+        skip "No DNS-capable utility available"
+    fi
+
+    printf '  %-25s ' "HTTPS connectivity"
+
+    if have curl; then
+
+        HTTP_CODE="$(
+            curl -k -sS \
+                -L \
+                --connect-timeout 3 \
+                --max-time 6 \
+                -o /dev/null \
+                -w '%{http_code}' \
+                https://www.cloudflare.com/ \
+                2>/dev/null
+        )"
+
+        case "$HTTP_CODE" in
+            2*|3*)
+                ok "HTTPS reachable (HTTP $HTTP_CODE)"
+                ;;
+            000|"")
+                warn "HTTPS connection failed"
+                ;;
+            *)
+                warn "HTTPS returned HTTP $HTTP_CODE"
+                ;;
+        esac
+
+    elif have wget; then
+
+        if wget -q -T 6 -O /dev/null \
+            https://www.cloudflare.com/ 2>/dev/null
+        then
+            ok "HTTPS reachable"
+        else
+            warn "HTTPS connection failed"
+        fi
+
+    else
+        skip "curl/wget not installed"
+    fi
+}
+
+# ================================================================
+# NETWORK STATE
+# ================================================================
+
+report_network_state() {
+
+    section "NETWORK STATE"
+
+    if have ip; then
+
+        ROUTES="$(ip route 2>/dev/null)"
+
+        DEFAULT="$(printf '%s\n' "$ROUTES" |
+            awk '$1=="default"{print $0; exit}')"
+
+        printf '  %-25s ' "Default route"
+
+        if [ -n "$DEFAULT" ]; then
+            ok "$DEFAULT"
+        else
+            skip "No default route exposed"
+        fi
+
+        ROUTE_COUNT="$(
+            printf '%s\n' "$ROUTES" |
+            grep -c '^[0-9]' 2>/dev/null
+        )"
+
+        printf '  %-25s ' "IPv4 routes"
+
+        if [ -n "$ROUTE_COUNT" ]; then
+            ok "$ROUTE_COUNT route(s)"
+        else
+            info "Unavailable"
+        fi
+
+        FAILED="$(
+            ip neigh 2>/dev/null |
+            grep -ci "FAILED" |
+            tr -d ' '
+        )"
+
+        [ -n "$FAILED" ] || FAILED=0
+
+        printf '  %-25s ' "Failed neighbors"
+
+        if [ "$FAILED" -gt 0 ] 2>/dev/null; then
+            warn "$FAILED FAILED neighbor(s)"
+        else
+            ok "0"
+        fi
+
+    else
+        skip "ip utility not installed"
+    fi
+}
+
+# ================================================================
+# PROCESSES
+# ================================================================
+
+process_running() {
+
+    PROC="$1"
+
+    if have pgrep; then
+        pgrep "$PROC" >/dev/null 2>&1
+        return $?
+    fi
+
+    ps 2>/dev/null |
+        grep -v grep |
+        grep -q "$PROC"
+}
+
+check_process() {
+
+    PROC="$1"
+    REQUIRED="$2"
+
+    if process_running "$PROC"; then
+
+        printf '  %-28s RUNNING\n' "$PROC"
+
+    else
+
+        if [ "$REQUIRED" = "yes" ]; then
+            issue "$PROC is not running"
+        else
+            printf '  %-28s NOT RUNNING\n' "$PROC"
+        fi
+    fi
+}
+
+report_processes() {
+
+    section "SERVICE / PROCESS HEALTH"
+
+    check_process dnsmasq yes
+    check_process hostapd yes
+
+    for P in \
+        dashboard_controller \
+        connkeeper \
+        udshape \
+        udsplash
+    do
+        if binary_exists "$P"; then
+            check_process "$P" yes
+        fi
+    done
+
+    for P in anyip juggler; do
+
+        if binary_exists "$P"; then
+            check_process "$P" no
+        else
+            printf '  %-28s NOT PRESENT / N/A\n' "$P"
+        fi
+    done
+
+    if have ps; then
+
+        ZOMBIES="$(
+            ps 2>/dev/null |
+            awk '$0 ~ / Z / || $0 ~ /<defunct>/ {c++}
+                 END {print c+0}'
+        )"
+
+        if [ "$ZOMBIES" -gt 0 ] 2>/dev/null; then
+            warn "$ZOMBIES zombie/defunct process(es) detected"
+        else
+            ok "No zombie processes detected"
+        fi
+    fi
+}
+
+# ================================================================
+# LOG ANALYSIS
+# ================================================================
+
+get_log() {
+
+    if have logread; then
+        logread 2>/dev/null
+
+    elif [ -r /var/log/messages ]; then
+        cat /var/log/messages 2>/dev/null
+    fi
+}
+
+count_log() {
+
+    PATTERN="$1"
+
+    get_log |
+        grep -Ei "$PATTERN" |
+        wc -l |
+        tr -d ' '
+}
+
+report_logs() {
+
+    section "LOG / EVENT HEALTH"
+
+    LINK_EVENTS="$(
+        count_log 'Link beat lost|link.*(down|lost)|carrier.*down'
+    )"
+
+    CHECKIN="$(
+        count_log 'dashboard check-in failed|check-in failed|checkin failed'
+    )"
+
+    LOOPS="$(
+        count_log 'with own address as source address|loop.*detected|network loop'
+    )"
+
+    INET="$(
+        count_log 'inet_unavailable'
+    )"
+
+    RECONFIG="$(
+        count_log 'reconfig|re-configure|configuration.*delay|delayed config'
+    )"
+
+    OOM="$(
+        count_log 'out of memory|oom-killer|killed process'
+    )"
+
+    DRIVER="$(
+        count_log 'ath10k|ath11k|firmware.*crash|firmware.*failed|watchdog.*reset|radio.*reset'
+    )"
+
+    printf '  %-30s %-8s %s\n' "TEST" "COUNT" "STATUS"
+
+    printf '  %-30s %-8s %s\n' \
+        "------------------------------" \
+        "--------" \
+        "----------"
+
+    printf '  %-30s %-8s %s\n' \
+        "Link / carrier events" \
+        "$LINK_EVENTS" \
+        "$([ "$LINK_EVENTS" -gt 0 ] 2>/dev/null && printf WARN || printf OK)"
+
+    printf '  %-30s %-8s %s\n' \
+        "Cloud check-in failures" \
+        "$CHECKIN" \
+        "$([ "$CHECKIN" -gt 0 ] 2>/dev/null && printf WARN || printf OK)"
+
+    printf '  %-30s %-8s %s\n' \
+        "Network loop events" \
+        "$LOOPS" \
+        "$([ "$LOOPS" -gt 0 ] 2>/dev/null && printf WARN || printf OK)"
+
+    printf '  %-30s %-8s %s\n' \
+        "inet_unavailable" \
+        "$INET" \
+        "$([ "$INET" -gt 0 ] 2>/dev/null && printf WARN || printf OK)"
+
+    printf '  %-30s %-8s %s\n' \
+        "Reconfiguration events" \
+        "$RECONFIG" \
+        "$([ "$RECONFIG" -gt 0 ] 2>/dev/null && printf WARN || printf OK)"
+
+    printf '  %-30s %-8s %s\n' \
+        "OOM / memory events" \
+        "$OOM" \
+        "$([ "$OOM" -gt 0 ] 2>/dev/null && printf FAIL || printf OK)"
+
+    printf '  %-30s %-8s %s\n' \
+        "Wi-Fi driver/firmware events" \
+        "$DRIVER" \
+        "$([ "$DRIVER" -gt 0 ] 2>/dev/null && printf WARN || printf OK)"
+
+    [ "$LINK_EVENTS" -gt 0 ] 2>/dev/null &&
+        warn "$LINK_EVENTS link/carrier event(s) found"
+
+    [ "$CHECKIN" -gt 0 ] 2>/dev/null &&
+        warn "$CHECKIN cloud check-in failure event(s) found"
+
+    [ "$LOOPS" -gt 0 ] 2>/dev/null &&
+        warn "$LOOPS possible network loop event(s) found"
+
+    [ "$INET" -gt 0 ] 2>/dev/null &&
+        warn "$INET inet_unavailable event(s) found"
+
+    [ "$RECONFIG" -gt 0 ] 2>/dev/null &&
+        warn "$RECONFIG reconfiguration event(s) found"
+
+    [ "$OOM" -gt 0 ] 2>/dev/null &&
+        issue "$OOM OOM/memory event(s) found"
+
+    [ "$DRIVER" -gt 0 ] 2>/dev/null &&
+        warn "$DRIVER Wi-Fi driver/firmware event(s) found"
+}
+
+# ================================================================
+# WIRELESS DISCOVERY
+# ================================================================
+
+get_ap_interfaces() {
+
+    if ! have iw; then
+        return
+    fi
+
+    iw dev 2>/dev/null |
+        awk '
+            /^phy#[0-9]+/ {
+                PHY=$0
+                sub(/^phy#/,"",PHY)
+                next
+            }
+
+            /^[[:space:]]*Interface / {
+                IFACE=$2
+                next
+            }
+
+            /^[[:space:]]*type AP$/ {
+                if(IFACE!="")
+                    print PHY "\t" IFACE
+
+                IFACE=""
+            }
+        '
+}
+
+get_channel() {
+
+    IF="$1"
+
+    iw dev "$IF" info 2>/dev/null |
+        awk '/channel / {print $2; exit}'
+}
+
+get_width() {
+
+    IF="$1"
+
+    iw dev "$IF" info 2>/dev/null |
+        awk '
+            /channel [0-9]+/ {
+                for(i=1;i<=NF;i++)
+                    if($i=="width") {
+                        print $(i+1)
+                        exit
+                    }
+            }
+        '
+}
+
+get_txpower() {
+
+    IF="$1"
+
+    iw dev "$IF" info 2>/dev/null |
+        awk '/txpower/ {print $2" "$3; exit}'
+}
+
+get_busy() {
+
+    IF="$1"
+
+    SURVEY="$(
+        iw dev "$IF" survey dump 2>/dev/null
+    )"
+
+    ACTIVE="$(
+        printf '%s\n' "$SURVEY" |
+        awk '/channel active time:/ {print $4; exit}'
+    )"
+
+    BUSY="$(
+        printf '%s\n' "$SURVEY" |
+        awk '/channel busy time:/ {print $4; exit}'
+    )"
+
+    if [ -n "$ACTIVE" ] &&
+       [ -n "$BUSY" ] &&
+       [ "$ACTIVE" -gt 0 ] 2>/dev/null
+    then
+
+        awk \
+            -v b="$BUSY" \
+            -v a="$ACTIVE" \
+            'BEGIN {printf "%.0f",(b/a)*100}'
+    else
+        printf 'N/A'
+    fi
+}
+
+get_noise() {
+
+    IF="$1"
+
+    iw dev "$IF" survey dump 2>/dev/null |
+        awk '/noise:/ {print $2; exit}'
+}
+# ============================================================
+# RADIO BUSY TIME
+# ============================================================
+
+radio_busy_time() {
+
+    printf '\n'
+    section "RADIO BUSY TIME"
+
+    printf '%-10s %-12s %-10s %-10s %-10s %s\n' \
+        "PHY" "IF" "CHANNEL" "WIDTH" "BUSY" "STATUS"
+
+    # Colors
+    C_GREEN='\033[0;32m'
+    C_YELLOW='\033[1;33m'
+    C_RED='\033[0;31m'
+    C_RESET='\033[0m'
+
+    for phy in /sys/class/ieee80211/phy*; do
+
+        [ -d "$phy" ] || continue
+
+        PHY_NAME="$(basename "$phy")"
+
+        # Find the first wireless interface belonging to this PHY
+        IFACE=""
+
+        for netdev in "$phy"/device/net/*; do
+            if [ -e "$netdev" ]; then
+                IFACE="$(basename "$netdev")"
+                break
+            fi
+        done
+
+        [ -n "$IFACE" ] || IFACE="N/A"
+
+        CHANNEL="N/A"
+        WIDTH="N/A"
+        BUSY="N/A"
+        STATUS="UNKNOWN"
+
+        # Find survey interface
+        SURVEY_IF="$IFACE"
+
+        # Get channel information
+        if command -v iw >/dev/null 2>&1 && [ "$IFACE" != "N/A" ]; then
+
+            CH_INFO="$(iw dev "$IFACE" info 2>/dev/null)"
+
+            CHANNEL="$(printf '%s\n' "$CH_INFO" |
+                awk '/channel/ {gsub(/[()]/,"",$2); print $2; exit}')"
+
+            WIDTH="$(printf '%s\n' "$CH_INFO" |
+                awk '/width:/ {print $2; exit}')"
+
+            [ -n "$CHANNEL" ] || CHANNEL="N/A"
+            [ -n "$WIDTH" ] || WIDTH="N/A"
+
+            # Radio survey data
+            SURVEY="$(iw dev "$IFACE" survey dump 2>/dev/null)"
+
+            BUSY_RAW="$(printf '%s\n' "$SURVEY" |
+                awk '/channel active time:/ {
+                    active=$NF
+                }
+                /channel busy time:/ {
+                    busy=$NF
+                    if (active > 0)
+                        printf "%d\n", (busy * 100 / active)
+                    exit
+                }')"
+
+            if [ -n "$BUSY_RAW" ]; then
+                BUSY="$BUSY_RAW%"
+            fi
+        fi
+
+        # Determine health
+        if [ "$BUSY" != "N/A" ]; then
+
+            BUSY_NUM="${BUSY%%%}"
+
+            if [ "$BUSY_NUM" -ge 70 ] 2>/dev/null; then
+                STATUS="HIGH"
+                COLOR="$C_RED"
+
+            elif [ "$BUSY_NUM" -ge 30 ] 2>/dev/null; then
+                STATUS="ELEVATED"
+                COLOR="$C_YELLOW"
+
+            else
+                STATUS="OK"
+                COLOR="$C_GREEN"
+            fi
+
+        else
+            COLOR="$C_YELLOW"
+        fi
+
+        printf '%-10s %-12s %-10s %-10s ' \
+            "$PHY_NAME" "$IFACE" "$CHANNEL" "$WIDTH"
+
+        printf '%b%-10s%b' \
+            "$COLOR" "$BUSY" "$C_RESET"
+
+        printf '%b%s%b\n' \
+            "$COLOR" "$STATUS" "$C_RESET"
+
+    done
+}
+# ================================================================
+# RADIO HEALTH
+# ================================================================
+
+report_radios() {
+
+    section "WIRELESS RADIO HEALTH"
+
+    if ! have iw; then
+        skip "iw is not installed"
+        return
+    fi
+
+    RADIO_FILE="${TMP_BASE}_radio"
+
+    get_ap_interfaces > "$RADIO_FILE" 2>/dev/null
+
+    if [ ! -s "$RADIO_FILE" ]; then
+        warn "No AP-mode wireless interfaces detected"
+        return
+    fi
+
+    printf '  %-8s %-12s %-8s %-9s %-8s %-8s %-10s %s\n' \
+        "PHY" "IF" "CHANNEL" "WIDTH" "BUSY" "NOISE" "TX POWER" "HEALTH"
+
+    printf '  %-8s %-12s %-8s %-9s %-8s %-8s %-10s %s\n' \
+        "--------" "------------" "--------" "---------" \
+        "--------" "--------" "----------" "----------"
+
+    SEEN=""
+
+    while IFS="$(printf '\t')" read -r PHY INT; do
+
+        [ -n "$PHY" ] || continue
+        [ -n "$INT" ] || continue
+
+        case " $SEEN " in
+            *" $PHY "*)
+                continue
+                ;;
+        esac
+
+        SEEN="$SEEN $PHY"
+
+        CHANNEL="$(get_channel "$INT")"
+        WIDTH="$(get_width "$INT")"
+        BUSY="$(get_busy "$INT")"
+        NOISE="$(get_noise "$INT")"
+        TXPOWER="$(get_txpower "$INT")"
+
+        [ -n "$CHANNEL" ] || CHANNEL="N/A"
+        [ -n "$WIDTH" ] || WIDTH="N/A"
+        [ -n "$BUSY" ] || BUSY="N/A"
+        [ -n "$NOISE" ] || NOISE="N/A"
+        [ -n "$TXPOWER" ] || TXPOWER="N/A"
+
+        HEALTH="OK"
+
+        if [ "$BUSY" != "N/A" ]; then
+
+            if [ "$BUSY" -gt 70 ] 2>/dev/null; then
+                HEALTH="HIGH"
+                issue "$INT reports ${BUSY}% channel busy time"
+
+            elif [ "$BUSY" -gt 50 ] 2>/dev/null; then
+                HEALTH="ELEVATED"
+                warn "$INT reports ${BUSY}% channel busy time"
+            fi
+        fi
+
+        printf '  %-8s %-12s %-8s %-9s %-8s %-8s %-10s %s\n' \
+            "phy$PHY" \
+            "$INT" \
+            "$CHANNEL" \
+            "$WIDTH" \
+            "${BUSY}%" \
+            "$NOISE" \
+            "$TXPOWER" \
+            "$HEALTH"
+
+    done < "$RADIO_FILE"
+}
+
+# ================================================================
+# CLIENTS
+# ================================================================
+
+count_clients() {
+
+    IF="$1"
+
+    iw "$IF" station dump 2>/dev/null |
+        awk '/^Station / {C++} END {print C+0}'
+}
+
+report_client_details() {
+
+    IF="$1"
+
+    iw "$IF" station dump 2>/dev/null |
+        awk -v IFACE="$IF" '
+
+            function emit() {
+
+                if(MAC!="")
+                    printf \
+                        "  %-10s %-20s %-8s %-18s %-12s %-8s\n",
+                        IFACE,
+                        MAC,
+                        SIGNAL,
+                        TX,
+                        INACTIVE,
+                        RETRIES
+            }
+
+            /^Station / {
+                emit()
+
+                MAC=$2
+                SIGNAL="N/A"
+                TX="N/A"
+                INACTIVE="N/A"
+                RETRIES="N/A"
+
+                next
+            }
+
+            /^[[:space:]]*signal:/ {
+                SIGNAL=$2" "$3
+                next
+            }
+
+            /^[[:space:]]*tx bitrate:/ {
+                TX=$3" "$4
+                next
+            }
+
+            /^[[:space:]]*inactive time:/ {
+                INACTIVE=$3" "$4
+                next
+            }
+
+            /^[[:space:]]*tx retries:/ {
+                RETRIES=$3
+                next
+            }
+
+            END {
+                emit()
+            }
+        '
+}
+
+report_clients() {
+
+    section "WI-FI CLIENT HEALTH"
+
+    if ! have iw; then
+        skip "iw is not installed"
+        return
+    fi
+
+    CLIENT_FILE="${TMP_BASE}_clients"
+
+    get_ap_interfaces > "$CLIENT_FILE" 2>/dev/null
+
+    if [ ! -s "$CLIENT_FILE" ]; then
+        skip "No AP-mode wireless interfaces detected"
+        return
+    fi
+
+    printf '  %-18s %s\n' "INTERFACE" "CLIENTS"
+
+    printf '  %-18s %s\n' \
+        "------------------" \
+        "-------"
+
+    TOTAL=0
+
+    while IFS="$(printf '\t')" read -r PHY INT; do
+
+        [ -n "$INT" ] || continue
+
+        COUNT="$(count_clients "$INT")"
+
+        [ -n "$COUNT" ] || COUNT=0
+
+        TOTAL=$((TOTAL + COUNT))
+
+        printf '  %-18s %s\n' \
+            "$INT" \
+            "$COUNT"
+
+    done < "$CLIENT_FILE"
+
+    printf '\n  Total clients: %s\n\n' "$TOTAL"
+
+    if [ "$TOTAL" -gt 0 ] 2>/dev/null; then
+
+        printf '  %-10s %-20s %-8s %-18s %-12s %-8s\n' \
+            "IF" \
+            "CLIENT MAC" \
+            "RSSI" \
+            "TX RATE" \
+            "INACTIVE" \
+            "RETRIES"
+
+        printf '  %-10s %-20s %-8s %-18s %-12s %-8s\n' \
+            "----------" \
+            "--------------------" \
+            "--------" \
+            "------------------" \
+            "------------" \
+            "--------"
+
+        while IFS="$(printf '\t')" read -r PHY INT; do
+
+            [ -n "$INT" ] || continue
+
+            report_client_details "$INT"
+
+        done < "$CLIENT_FILE"
+    fi
+}
+
+# ================================================================
+# MANAGEMENT
+# ================================================================
+
+report_management() {
+
+    section "MANAGEMENT CONNECTIVITY"
+
+    MANAGEMENT_IP=""
+    MANAGEMENT_INT=""
+
+    for D in /sys/class/net/*; do
+
+        [ -e "$D" ] || continue
+
+        INT="${D##*/}"
+
+        case "$INT" in
+            lo|bat*|br-*|erspan*|ifb*|miireg|teql*|survey|wlan*)
+                continue
+                ;;
+        esac
+
+        ADDR="$(get_ipv4 "$INT")"
+
+        case "$ADDR" in
+            ""|127.*)
+                continue
+                ;;
+        esac
+
+        MANAGEMENT_IP="$ADDR"
+        MANAGEMENT_INT="$INT"
+
+        break
+    done
+
+    printf '  %-25s ' "Management IP"
+
+    if [ -n "$MANAGEMENT_IP" ]; then
+        ok "$MANAGEMENT_IP ($MANAGEMENT_INT)"
+    else
+        warn "No IPv4 management address found"
+    fi
+}
+
+# ================================================================
+# DHCP / BRIDGES
+# ================================================================
+
+report_dhcp_bridge() {
+
+    section "DHCP / BRIDGE HEALTH"
+
+    if binary_exists dnsmasq; then
+
+        if process_running dnsmasq; then
+            ok "dnsmasq is running"
+        else
+            info "dnsmasq installed but not running"
+        fi
+
+    else
+        skip "dnsmasq not installed / not applicable"
+    fi
+
+    if have brctl; then
+
+        BRIDGES="$(
+            brctl show 2>/dev/null |
+            awk 'NR>1 && $1!="" {print $1}' |
+            sort -u |
+            tr '\n' ' ' |
+            sed 's/[[:space:]]*$//'
+        )"
+
+        if [ -n "$BRIDGES" ]; then
+            ok "Bridges: $BRIDGES"
+        else
+            info "No bridge information returned"
+        fi
+
+    elif [ -d /sys/class/net ]; then
+
+        BRIDGE_COUNT="$(
+            find /sys/class/net \
+                -maxdepth 2 \
+                -type l \
+                -path '*/bridge' \
+                2>/dev/null |
+            wc -l |
+            tr -d ' '
+        )"
+
+        if [ "${BRIDGE_COUNT:-0}" -gt 0 ] 2>/dev/null; then
+            ok "$BRIDGE_COUNT bridge interface(s) detected"
+        else
+            info "Bridge details not exposed"
+        fi
+
+    else
+        skip "Bridge information unavailable"
+    fi
+}
+
+# ================================================================
+# FINAL VERDICT
+# ================================================================
+
+report_summary() {
+
+    section "NOORALYZER VERDICT"
+
+    printf '  %-25s %s\n' "Issues" "$ISSUES"
+    printf '  %-25s %s\n' "Warnings" "$WARNINGS"
+    printf '  %-25s %s\n' "Informational" "$INFO_COUNT"
+
+    printf '\n'
+
+    if [ "$ISSUES" -eq 0 ] &&
+       [ "$WARNINGS" -eq 0 ]
+    then
+
+        printf '%s\n' \
+            "$C_GREEN+--------------------------------------------------------------+$C_RESET"
+
+        printf '%s\n' \
+            "$C_GREEN|                 HEALTH: GOOD                             |$C_RESET"
+
+        printf '%s\n' \
+            "$C_GREEN+--------------------------------------------------------------+$C_RESET"
+
+    elif [ "$ISSUES" -eq 0 ]; then
+
+        printf '%s\n' \
+            "$C_YELLOW+--------------------------------------------------------------+$C_RESET"
+
+        printf '%s\n' \
+            "$C_YELLOW|                 HEALTH: REVIEW                           |$C_RESET"
+
+        printf '%s\n' \
+            "$C_YELLOW+--------------------------------------------------------------+$C_RESET"
+
+    else
+
+        printf '%s\n' \
+            "$C_RED+--------------------------------------------------------------+$C_RESET"
+
+        printf '%s\n' \
+            "$C_RED|                 HEALTH: ATTENTION                        |$C_RESET"
+
+        printf '%s\n' \
+            "$C_RED+--------------------------------------------------------------+$C_RESET"
+    fi
+
+    printf '\n'
+
+    printf '  [ -- ] means the test/capability is not available.\n'
+    printf '  [ -- ] does NOT count as a failure.\n'
+}
+
+# ================================================================
+# NOORALYZER HEADER
+# ================================================================
+
+printf '\n'
+
+printf '%s\n' "$C_CYAN"
+
+printf '%s\n' '░███    ░██                                     ░██                                     '
+printf '%s\n' '░████   ░██                                     ░██                                     '
+printf '%s\n' '░██░██  ░██ ░███████  ░███████ ░██░████░██████  ░██░██    ░██░█████████░███████ ░██░████'
+printf '%s\n' '░██ ░██ ░██░██    ░██░██    ░██░███         ░██ ░██░██    ░██     ░███░██    ░██░███    '
+printf '%s\n' '░██  ░██░██░██    ░██░██    ░██░██     ░███████ ░██░██    ░██   ░███  ░█████████░██     '
+printf '%s\n' '░██   ░████░██    ░██░██    ░██░██    ░██   ░██ ░██░██   ░███ ░███    ░██       ░██     '
+printf '%s\n' '░██    ░███ ░███████  ░███████ ░██     ░█████░██░██ ░█████░██░█████████░███████ ░██     '
+printf '%s\n' '                                                          ░██                           '
+printf '%s\n' '                                                    ░███████                            '
+
+printf '%s\n' "$C_RESET"
+
+printf '%s\n' '──────────────────────────────────────────────────────────────────────────────'
+printf '%s\n' '              Datto Networking AP Diagnostic & Troubleshooting Tool'
+printf '%s\n' '──────────────────────────────────────────────────────────────────────────────'
+
+printf '\n'
+
+printf '  Nooralyzer version : %s\n' "$VERSION"
+printf '  Host               : %s\n' "$(get_hostname)"
+printf '  Started            : %s\n' \
+    "$(date -u '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null)"
+
+printf '  Mode               : Diagnose . Detect . Troubleshoot\n'
+
+# ================================================================
+# RUN DIAGNOSTICS
+# ================================================================
+
+report_system
+report_wired
+report_ethernet_errors
+report_ip
+report_connectivity
+report_network_state
+report_management
+report_dhcp_bridge
+report_processes
+report_logs
+report_radios
+radio_busy_time
 report_clients
 report_summary
 
