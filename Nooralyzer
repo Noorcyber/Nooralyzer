@@ -1018,7 +1018,116 @@ get_noise() {
     iw dev "$IF" survey dump 2>/dev/null |
         awk '/noise:/ {print $2; exit}'
 }
+# ============================================================
+# RADIO BUSY TIME
+# ============================================================
 
+radio_busy_time() {
+
+    printf '\n'
+    section "RADIO BUSY TIME"
+
+    printf '%-10s %-12s %-10s %-10s %-10s %s\n' \
+        "PHY" "IF" "CHANNEL" "WIDTH" "BUSY" "STATUS"
+
+    # Colors
+    C_GREEN='\033[0;32m'
+    C_YELLOW='\033[1;33m'
+    C_RED='\033[0;31m'
+    C_RESET='\033[0m'
+
+    for phy in /sys/class/ieee80211/phy*; do
+
+        [ -d "$phy" ] || continue
+
+        PHY_NAME="$(basename "$phy")"
+
+        # Find the first wireless interface belonging to this PHY
+        IFACE=""
+
+        for netdev in "$phy"/device/net/*; do
+            if [ -e "$netdev" ]; then
+                IFACE="$(basename "$netdev")"
+                break
+            fi
+        done
+
+        [ -n "$IFACE" ] || IFACE="N/A"
+
+        CHANNEL="N/A"
+        WIDTH="N/A"
+        BUSY="N/A"
+        STATUS="UNKNOWN"
+
+        # Find survey interface
+        SURVEY_IF="$IFACE"
+
+        # Get channel information
+        if command -v iw >/dev/null 2>&1 && [ "$IFACE" != "N/A" ]; then
+
+            CH_INFO="$(iw dev "$IFACE" info 2>/dev/null)"
+
+            CHANNEL="$(printf '%s\n' "$CH_INFO" |
+                awk '/channel/ {gsub(/[()]/,"",$2); print $2; exit}')"
+
+            WIDTH="$(printf '%s\n' "$CH_INFO" |
+                awk '/width:/ {print $2; exit}')"
+
+            [ -n "$CHANNEL" ] || CHANNEL="N/A"
+            [ -n "$WIDTH" ] || WIDTH="N/A"
+
+            # Radio survey data
+            SURVEY="$(iw dev "$IFACE" survey dump 2>/dev/null)"
+
+            BUSY_RAW="$(printf '%s\n' "$SURVEY" |
+                awk '/channel active time:/ {
+                    active=$NF
+                }
+                /channel busy time:/ {
+                    busy=$NF
+                    if (active > 0)
+                        printf "%d\n", (busy * 100 / active)
+                    exit
+                }')"
+
+            if [ -n "$BUSY_RAW" ]; then
+                BUSY="$BUSY_RAW%"
+            fi
+        fi
+
+        # Determine health
+        if [ "$BUSY" != "N/A" ]; then
+
+            BUSY_NUM="${BUSY%%%}"
+
+            if [ "$BUSY_NUM" -ge 70 ] 2>/dev/null; then
+                STATUS="HIGH"
+                COLOR="$C_RED"
+
+            elif [ "$BUSY_NUM" -ge 30 ] 2>/dev/null; then
+                STATUS="ELEVATED"
+                COLOR="$C_YELLOW"
+
+            else
+                STATUS="OK"
+                COLOR="$C_GREEN"
+            fi
+
+        else
+            COLOR="$C_YELLOW"
+        fi
+
+        printf '%-10s %-12s %-10s %-10s ' \
+            "$PHY_NAME" "$IFACE" "$CHANNEL" "$WIDTH"
+
+        printf '%b%-10s%b' \
+            "$COLOR" "$BUSY" "$C_RESET"
+
+        printf '%b%s%b\n' \
+            "$COLOR" "$STATUS" "$C_RESET"
+
+    done
+}
 # ================================================================
 # RADIO HEALTH
 # ================================================================
