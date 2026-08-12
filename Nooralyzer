@@ -123,16 +123,11 @@ get_model() {
 }
 
 get_firmware() {
-    if [ -r /etc/openwrt_release ]; then
-        awk -F= '
-            /^DISTRIB_DESCRIPTION=/ {
-                gsub(/\047/, "", $2)
-                print $2
-                exit
-            }
-        ' /etc/openwrt_release 2>/dev/null
+
+    if [ -r /etc/fw_core_version ]; then
+        tr -d '[:space:]' < /etc/fw_core_version 2>/dev/null
     else
-        uname -r 2>/dev/null
+        echo "Not exposed"
     fi
 }
 
