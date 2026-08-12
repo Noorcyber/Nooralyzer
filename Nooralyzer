@@ -183,7 +183,6 @@ get_duplex() {
 report_system() {
 
     section "SYSTEM HEALTH"
-
     MEM_TOTAL="$(get_mem_total)"
     MEM_AVAIL="$(get_mem_available)"
 
@@ -669,7 +668,6 @@ report_network_state() {
     if have ip; then
 
         ROUTES="$(ip route 2>/dev/null)"
-
         DEFAULT="$(printf '%s\n' "$ROUTES" |
             awk '$1=="default"{print $0; exit}')"
 
@@ -997,8 +995,8 @@ get_busy() {
         awk '/channel busy time:/ {print $4; exit}'
     )"
 
-    if [ -n "$ACTIVE" ] &&
-       [ -n "$BUSY" ] &&
+    if [ -n "$BUSY" ] &&
+       [ -n "$ACTIVE" ] &&
        [ "$ACTIVE" -gt 0 ] 2>/dev/null
     then
 
@@ -1018,6 +1016,7 @@ get_noise() {
     iw dev "$IF" survey dump 2>/dev/null |
         awk '/noise:/ {print $2; exit}'
 }
+
 # ============================================================
 # RADIO BUSY TIME
 # ============================================================
@@ -1128,6 +1127,7 @@ radio_busy_time() {
 
     done
 }
+
 # ================================================================
 # RADIO HEALTH
 # ================================================================
@@ -1231,7 +1231,6 @@ report_client_details() {
         awk -v IFACE="$IF" '
 
             function emit() {
-
                 if(MAC!="")
                     printf \
                         "  %-10s %-20s %-8s %-18s %-12s %-8s\n",
