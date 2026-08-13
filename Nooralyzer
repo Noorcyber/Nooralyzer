@@ -170,93 +170,107 @@ get_carrier() {
     read_sys "/sys/class/net/$1/carrier"
 }
 
+# ================================================================
+# CURRENT / NEGOTIATED LINK SPEED
+# ================================================================
+
 get_speed() {
-    read_sys "/sys/class/net/$1/speed"
+    INT="$1"
+
+    SPEED="$(read_sys "/sys/class/net/$INT/speed")"
+
+    case "$SPEED" in
+        ""|-1|0|65535)
+            printf 'N/A\n'
+            ;;
+        *[!0-9]*)
+            printf 'N/A\n'
+            ;;
+        *)
+            printf '%s Mbps\n' "$SPEED"
+            ;;
+    esac
 }
 
 get_duplex() {
-    read_sys "/sys/class/net/$1/duplex"
+    DUPLEX="$(read_sys "/sys/class/net/$1/duplex")"
+
+    [ -n "$DUPLEX" ] || DUPLEX="unknown"
+
+    printf '%s\n' "$DUPLEX"
 }
 
 # ================================================================
 # ETHERNET CAPABILITY
-# ================================================================
-# Returns the highest supported Ethernet speed reported by
-# ethtool.
 #
-# CAPABILITY = what the Ethernet interface supports.
-# SPEED      = what the interface is currently negotiating.
+# Uses ethtool when available.
+#
+# CAPABILITY = highest advertised/supported Ethernet speed.
+# SPEED      = actual negotiated link speed.
 #
 # If ethtool is unavailable, capability is reported as N/A.
+# We deliberately do NOT guess the capability from current speed.
 # ================================================================
 
-get_supported_speed() {
+get_capability() {
     INT="$1"
 
-    if ! have ethtool; then
+    if ! binary_exists ethtool; then
         printf 'N/A\n'
         return
     fi
 
-    ETHTOOL_OUT="$(
-        ethtool "$INT" 2>/dev/null
-    )"
+    ETHTOOL_OUTPUT="$(ethtool "$INT" 2>/dev/null)"
 
-    [ -n "$ETHTOOL_OUT" ] || {
+    [ -n "$ETHTOOL_OUTPUT" ] || {
         printf 'N/A\n'
         return
     }
 
-    MAX_SPEED="$(
-        printf '%s\n' "$ETHTOOL_OUT" |
+    CAPABILITY="$(
+        printf '%s\n' "$ETHTOOL_OUTPUT" |
         awk '
-            BEGIN {
-                max=0
-                IN_SUPPORTED=0
-            }
-
             /Supported link modes:/ {
-                IN_SUPPORTED=1
-                next
+                START=1
             }
 
-            IN_SUPPORTED && /^[^[:space:]]/ {
-                IN_SUPPORTED=0
+            START {
+                for(i=1;i<=NF;i++) {
+                    VALUE=$i
+
+                    gsub(/baseT.*/, "", VALUE)
+                    gsub(/baseK.*/, "", VALUE)
+                    gsub(/baseX.*/, "", VALUE)
+                    gsub(/baseR.*/, "", VALUE)
+                    gsub(/baseS.*/, "", VALUE)
+
+                    if(VALUE ~ /^[0-9]+Mb\/s$/) {
+                        SPEED=VALUE
+                        sub(/Mb\/s$/, "", SPEED)
+
+                        if(SPEED+0 > MAX)
+                            MAX=SPEED+0
+                    }
+                }
             }
 
-            IN_SUPPORTED {
-                if ($0 ~ /25000base/) {
-                    if (max < 25000) max=25000
-                }
-                else if ($0 ~ /10000base/) {
-                    if (max < 10000) max=10000
-                }
-                else if ($0 ~ /5000base/) {
-                    if (max < 5000) max=5000
-                }
-                else if ($0 ~ /2500base/) {
-                    if (max < 2500) max=2500
-                }
-                else if ($0 ~ /1000base/) {
-                    if (max < 1000) max=1000
-                }
-                else if ($0 ~ /100base/) {
-                    if (max < 100) max=100
-                }
-                else if ($0 ~ /10base/) {
-                    if (max < 10) max=10
+            /Supported pause frame use:/ {
+                if(MAX > 0) {
+                    printf "%.0f Mbps\n", MAX
+                    exit
                 }
             }
 
             END {
-                if (max > 0)
-                    print max
+                if(MAX > 0)
+                    printf "%.0f Mbps\n", MAX
             }
-        '
+        ' |
+        tail -n 1
     )"
 
-    if [ -n "$MAX_SPEED" ]; then
-        printf '%s Mbps\n' "$MAX_SPEED"
+    if [ -n "$CAPABILITY" ]; then
+        printf '%s\n' "$CAPABILITY"
     else
         printf 'N/A\n'
     fi
@@ -333,7 +347,6 @@ report_system() {
             else
                 ok "CPU temperature ${TEMP}C"
             fi
-
         fi
     else
         skip "CPU temperature not exposed by this platform"
@@ -371,8 +384,8 @@ report_wired() {
         "IF" "LINK" "CAPABILITY" "SPEED" "DUPLEX" "MAC" "IPv4"
 
     printf '  %-8s %-8s %-13s %-13s %-10s %-18s %s\n' \
-        "--------" "--------" "-------------" "-------------" "----------" \
-        "------------------" "----------------"
+        "--------" "--------" "-------------" "-------------" \
+        "----------" "------------------" "----------------"
 
     FOUND=0
 
@@ -387,15 +400,17 @@ report_wired() {
         FOUND=1
 
         CARRIER="$(get_carrier "$INT")"
+        CAPABILITY="$(get_capability "$INT")"
         SPEED="$(get_speed "$INT")"
-        CAPABILITY="$(get_supported_speed "$INT")"
         DUPLEX="$(get_duplex "$INT")"
         MAC="$(get_mac "$INT")"
         IPADDR="$(get_ipv4 "$INT")"
 
         [ -n "$MAC" ] || MAC="-"
         [ -n "$IPADDR" ] || IPADDR="-"
-        [ -n "$DUPLEX" ] || DUPLEX="N/A"
+        [ -n "$DUPLEX" ] || DUPLEX="unknown"
+        [ -n "$CAPABILITY" ] || CAPABILITY="N/A"
+        [ -n "$SPEED" ] || SPEED="N/A"
 
         case "$CARRIER" in
             1) LINK="UP" ;;
@@ -403,17 +418,47 @@ report_wired() {
             *) LINK="?" ;;
         esac
 
-        case "$SPEED" in
-            ""|-1|0|65535)
-                SPEED="N/A"
-                ;;
-            *)
-                SPEED="${SPEED} Mbps"
-                ;;
-        esac
+        if [ "$LINK" = "UP" ]; then
+            LINK_COLOR="$C_GREEN"
+        elif [ "$LINK" = "DOWN" ]; then
+            LINK_COLOR="$C_RED"
+        else
+            LINK_COLOR="$C_YELLOW"
+        fi
 
-        printf '  %-8s %-8s %-13s %-13s %-10s %-18s %s\n' \
-            "$INT" "$LINK" "$CAPABILITY" "$SPEED" "$DUPLEX" "$MAC" "$IPADDR"
+        printf '  %-8s ' "$INT"
+
+        printf '%s%-8s%s ' \
+            "$LINK_COLOR" \
+            "$LINK" \
+            "$C_RESET"
+
+        printf '%-13s ' "$CAPABILITY"
+
+        if [ "$SPEED" = "N/A" ]; then
+            printf '%s%-13s%s ' \
+                "$C_DIM" \
+                "$SPEED" \
+                "$C_RESET"
+        else
+            printf '%s%-13s%s ' \
+                "$C_GREEN" \
+                "$SPEED" \
+                "$C_RESET"
+        fi
+
+        if [ "$DUPLEX" = "half" ]; then
+            printf '%s%-10s%s ' \
+                "$C_RED" \
+                "$DUPLEX" \
+                "$C_RESET"
+        else
+            printf '%-10s ' "$DUPLEX"
+        fi
+
+        printf '%-18s %s\n' \
+            "$MAC" \
+            "$IPADDR"
 
         if [ "$LINK" = "UP" ]; then
 
@@ -430,41 +475,20 @@ report_wired() {
                 issue "$INT is running HALF duplex"
             fi
 
-            # Detect a lower-than-capable negotiated link.
-            # This is especially useful for identifying a 100 Mbps
-            # negotiation on hardware/cabling expected to support 1 Gbps.
+            # Compare advertised capability against current speed.
             if [ "$CAPABILITY" != "N/A" ] &&
-               [ "$SPEED" != "N/A" ] &&
-               [ "$CAPABILITY" != "$SPEED" ]
+               [ "$SPEED" != "N/A" ]
             then
 
-                case "$CAPABILITY:$SPEED" in
+                CAP_NUM="$(printf '%s\n' "$CAPABILITY" | awk '{print $1}')"
+                SPEED_NUM="$(printf '%s\n' "$SPEED" | awk '{print $1}')"
 
-                    "1000 Mbps:100 Mbps")
-                        warn "$INT negotiated at 100 Mbps but supports up to 1000 Mbps; check cable and switch port"
-                        ;;
-
-                    "1000 Mbps:10 Mbps")
-                        warn "$INT negotiated at 10 Mbps but supports up to 1000 Mbps; check cable and switch port"
-                        ;;
-
-                    "2500 Mbps:1000 Mbps")
-                        warn "$INT negotiated at 1000 Mbps but supports up to 2500 Mbps; check cable and switch port"
-                        ;;
-
-                    "2500 Mbps:100 Mbps")
-                        warn "$INT negotiated at 100 Mbps but supports up to 2500 Mbps; check cable and switch port"
-                        ;;
-
-                    "10000 Mbps:1000 Mbps")
-                        warn "$INT negotiated at 1000 Mbps but supports up to 10000 Mbps; check cable and switch port"
-                        ;;
-
-                    "10000 Mbps:100 Mbps")
-                        warn "$INT negotiated at 100 Mbps but supports up to 10000 Mbps; check cable and switch port"
-                        ;;
-
-                esac
+                if [ -n "$CAP_NUM" ] &&
+                   [ -n "$SPEED_NUM" ] &&
+                   [ "$CAP_NUM" -gt "$SPEED_NUM" ] 2>/dev/null
+                then
+                    warn "$INT capability is $CAPABILITY but current link is $SPEED"
+                fi
             fi
         fi
     done
@@ -532,8 +556,20 @@ report_ethernet_errors() {
             HEALTH="HIGH"
         fi
 
-        printf '  %-8s %-9s %-9s %-9s %-9s %-9s %s\n' \
-            "$INT" "$RXERR" "$TXERR" "$RXDROP" "$TXDROP" "$CARRIER" "$HEALTH"
+        printf '  %-8s %-9s %-9s %-9s %-9s %-9s ' \
+            "$INT" "$RXERR" "$TXERR" "$RXDROP" "$TXDROP" "$CARRIER"
+
+        case "$HEALTH" in
+            OK)
+                printf '%s%s%s\n' "$C_GREEN" "$HEALTH" "$C_RESET"
+                ;;
+            WARN)
+                printf '%s%s%s\n' "$C_YELLOW" "$HEALTH" "$C_RESET"
+                ;;
+            HIGH)
+                printf '%s%s%s\n' "$C_RED" "$HEALTH" "$C_RESET"
+                ;;
+        esac
 
         if [ "$HEALTH" = "HIGH" ]; then
             issue "$INT has high Ethernet error/carrier counts"
@@ -1803,7 +1839,8 @@ printf '\n'
 
 printf '  Nooralyzer version : %s\n' "$VERSION"
 printf '  Host               : %s\n' "$(get_hostname)"
-printf '  Started            : %s\n' "$(date -u '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null)"
+printf '  Started            : %s\n' \
+    "$(date -u '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null)"
 printf '  Mode               : Diagnose . Detect . Troubleshoot\n'
 
 # ================================================================
@@ -1834,7 +1871,7 @@ printf '\n'
 printf '%s+----------------------------------------------------------------------+%s\n' \
     "$C_CYAN" "$C_RESET"
 
-printf '%s|                       NOORALYZER COMPLETE                         |%s\n' \
+printf '%s|                       NOORALYZER COMPLETE                          |%s\n' \
     "$C_CYAN" "$C_RESET"
 
 printf '%s+----------------------------------------------------------------------+%s\n' \
