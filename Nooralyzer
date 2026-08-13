@@ -1,13 +1,13 @@
 #!/bin/sh
 
 # ================================================================
-# NOORALYZER v1.5.1
+# NOORALYZER v1.5
 # DNET AP Diagnostic & Troubleshooting Tool
 #
 # Read-only diagnostics for Datto/Kaseya Networking APs
 # ================================================================
 
-VERSION="1.5.1"
+VERSION="1.5"
 TMP_BASE="/tmp/nooralyzer.$$"
 
 # ================================================================
@@ -472,33 +472,14 @@ ping_test() {
         return 1
     fi
 
-    # BusyBox/OpenWrt ping output can look like:
-    #
-    # 3 packets transmitted, 3 packets received, 0% packet loss
-    #
-    # The previous parser incorrectly returned "0packetloss".
-    # This parser specifically extracts the numeric percentage
-    # immediately before "% packet loss".
-
-    LOSS="$(awk '
+    LOSS="$(awk -F',' '
         /packet loss/ {
-            for (i=1; i<=NF; i++) {
-                if ($i ~ /^[0-9]+([.][0-9]+)?%$/) {
-                    gsub(/%/, "", $i)
-                    print $i
-                    exit
-                }
-            }
+            gsub(/%/,"",$3)
+            gsub(/ /,"",$3)
+            print $3
+            exit
         }
     ' "$PING_FILE" 2>/dev/null)"
-
-    # Fallback parser for alternate ping formatting.
-    if [ -z "$LOSS" ]; then
-        LOSS="$(sed -n \
-            's/.*,\([0-9][0-9.]*\)%[[:space:]]*packet loss.*/\1/p' \
-            "$PING_FILE" 2>/dev/null |
-            head -n 1)"
-    fi
 
     LATENCY="$(awk -F'=' '
         /round-trip|rtt/ {
@@ -509,7 +490,7 @@ ping_test() {
         }
     ' "$PING_FILE" 2>/dev/null)"
 
-    [ -n "$LOSS" ] || LOSS="N/A"
+    [ -n "$LOSS" ] || LOSS="0"
     [ -n "$LATENCY" ] || LATENCY="N/A"
 
     printf '%s|%s' "$LOSS" "$LATENCY"
@@ -556,8 +537,6 @@ report_connectivity() {
 
             if [ "$LOSS" = "0" ] || [ "$LOSS" = "0.0" ]; then
                 ok "Reachable - ${LATENCY} ms average"
-            elif [ "$LOSS" = "N/A" ]; then
-                warn "Gateway reachable but packet loss could not be determined"
             else
                 warn "Gateway packet loss: ${LOSS}%"
             fi
@@ -582,8 +561,6 @@ report_connectivity() {
 
             if [ "$LOSS" = "0" ] || [ "$LOSS" = "0.0" ]; then
                 ok "Reachable - ${LATENCY} ms average"
-            elif [ "$LOSS" = "N/A" ]; then
-                warn "Internet reachable but packet loss could not be determined"
             else
                 warn "Internet packet loss: ${LOSS}%"
             fi
@@ -729,9 +706,9 @@ report_network_state() {
         printf '  %-25s ' "Failed neighbors"
 
         if [ "$FAILED" -gt 0 ] 2>/dev/null; then
-            warn "$FAILED unresolved neighbor entries detected"
+            warn "$FAILED FAILED neighbor(s)"
         else
-            ok "0 unresolved neighbor entries"
+            ok "0"
         fi
 
     else
@@ -1007,7 +984,20 @@ get_txpower() {
 }
 
 # ================================================================
-# RADIO BUSY TIME
+# FIXED RADIO BUSY TIME
+#
+# Uses the survey record marked "[in use]" first.
+#
+# A PHY can contain multiple AP interfaces. The survey belongs to
+# the radio/PHY, not independently to every SSID/VAP.
+#
+# We therefore:
+# 1. Try the primary AP interface.
+# 2. Try other interfaces belonging to the same PHY.
+# 3. Prefer the survey record marked [in use].
+# 4. Fall back to the first valid survey record if [in use]
+#    is not exposed by the driver.
+# 5. Never divide by zero.
 # ================================================================
 
 get_busy_from_survey() {
@@ -1511,58 +1501,231 @@ report_clients() {
 }
 
 # ================================================================
-# MANAGEMENT
+# SSID INTERFACES
+#
+# Displays the wireless interface and its associated SSID/ESSID.
+#
+# This allows support to identify:
+#   SSID
+#   Wireless interface
+#   BSSID
+#   Client count
+#   Band
+#   Channel
+#   Channel width
+#   TX power
+#   PHY
+#   Actual ESSID
+#
+# Existing diagnostics are not modified.
 # ================================================================
 
-# Determine the most likely management interface.
-#
-# Priority:
-# 1. br-wired0 - Datto AP wired/management bridge when exposed.
-# 2. Interface used by the default route.
-# 3. Physical Ethernet interface with an IPv4 address.
-# 4. Other non-SSID bridge/interface with an IPv4 address.
-#
-# This avoids incorrectly reporting "No IPv4 management address"
-# simply because the management address lives on br-wired0.
+get_ssid_number() {
 
-get_default_route_interface() {
+    IF="$1"
 
-    if have ip; then
-        ip route 2>/dev/null |
-            awk '
-                $1=="default" {
-                    for(i=1;i<=NF;i++) {
-                        if($i=="dev") {
-                            print $(i+1)
-                            exit
-                        }
-                    }
-                }
-            '
+    case "$IF" in
+        ap1_1|ap2_1)
+            echo "SSID1"
+            ;;
+        ap1_2|ap2_2)
+            echo "SSID2"
+            ;;
+        ap1_3|ap2_3)
+            echo "SSID3"
+            ;;
+        ap1_4|ap2_4)
+            echo "SSID4"
+            ;;
+        *)
+            echo "-"
+            ;;
+    esac
+}
+
+get_bssid() {
+
+    IF="$1"
+
+    get_mac "$IF"
+}
+
+get_band() {
+
+    IF="$1"
+
+    CHANNEL="$(get_channel "$IF")"
+
+    if [ -z "$CHANNEL" ]; then
+        echo "-"
+        return
     fi
-}
 
-management_candidate_ip() {
-
-    INT="$1"
-
-    case "$INT" in
-        ""|lo)
-            return 1
+    case "$CHANNEL" in
+        1|2|3|4|5|6|7|8|9|10|11|12|13|14)
+            echo "2.4"
+            ;;
+        *)
+            echo "5"
             ;;
     esac
+}
 
-    ADDR="$(get_ipv4 "$INT")"
+get_txpower_dbm() {
 
-    case "$ADDR" in
-        ""|127.*)
-            return 1
+    IF="$1"
+
+    iw dev "$IF" info 2>/dev/null |
+        awk '
+            /txpower/ {
+                print $2
+                exit
+            }
+        '
+}
+
+get_essid() {
+
+    IF="$1"
+
+    iw dev "$IF" info 2>/dev/null |
+        awk '
+            /^[[:space:]]*ssid / {
+                sub(/^[[:space:]]*ssid /,"")
+                print
+                exit
+            }
+        '
+}
+
+get_ssid_width() {
+
+    IF="$1"
+
+    WIDTH="$(get_width "$IF")"
+
+    case "$WIDTH" in
+        ""|N/A)
+            echo "-"
+            ;;
+        *)
+            printf '%s\n' "$WIDTH" |
+                sed 's/[^0-9]*//g'
             ;;
     esac
-
-    printf '%s\n' "$ADDR"
-    return 0
 }
+
+report_ssid_interfaces() {
+
+    section "SSID INTERFACES"
+
+    if ! have iw; then
+        skip "iw is not installed"
+        return
+    fi
+
+    SSID_FILE="${TMP_BASE}_ssid_interfaces"
+
+    get_ap_interfaces > "$SSID_FILE" 2>/dev/null
+
+    if [ ! -s "$SSID_FILE" ]; then
+        skip "No AP-mode wireless interfaces detected"
+        return
+    fi
+
+    printf '  %-6s %-8s %-18s %-8s %-6s %-4s %-6s %-8s %-7s %-36s\n' \
+        "SSID" \
+        "IF" \
+        "BSSID" \
+        "Clients" \
+        "Band" \
+        "Ch" \
+        "Width" \
+        "Tx" \
+        "Phy" \
+        "ESSID"
+
+    printf '  %-6s %-8s %-18s %-8s %-6s %-4s %-6s %-8s %-7s %-36s\n' \
+        "------" \
+        "--------" \
+        "------------------" \
+        "--------" \
+        "------" \
+        "----" \
+        "------" \
+        "--------" \
+        "-------" \
+        "------------------------------------"
+
+    TOTAL_SSID_CLIENTS=0
+
+    while IFS="$(printf '\t')" read -r PHY INT; do
+
+        [ -n "$INT" ] || continue
+
+        SSID="$(get_ssid_number "$INT")"
+        BSSID="$(get_bssid "$INT")"
+        CLIENTS="$(count_clients "$INT")"
+        BAND="$(get_band "$INT")"
+        CHANNEL="$(get_channel "$INT")"
+        WIDTH="$(get_ssid_width "$INT")"
+        TXPOWER="$(get_txpower_dbm "$INT")"
+        ESSID="$(get_essid "$INT")"
+
+        [ -n "$BSSID" ] || BSSID="-"
+        [ -n "$CLIENTS" ] || CLIENTS="0"
+        [ -n "$BAND" ] || BAND="-"
+        [ -n "$CHANNEL" ] || CHANNEL="-"
+        [ -n "$WIDTH" ] || WIDTH="-"
+        [ -n "$TXPOWER" ] || TXPOWER="-"
+        [ -n "$ESSID" ] || ESSID="-"
+
+        TOTAL_SSID_CLIENTS=$((TOTAL_SSID_CLIENTS + CLIENTS))
+
+        printf '  %-6s %-8s %-18s %-8s %-6s %-4s %-6s %-8s %-7s %-36s\n' \
+            "$SSID" \
+            "$INT" \
+            "$BSSID" \
+            "$CLIENTS" \
+            "$BAND" \
+            "$CHANNEL" \
+            "$WIDTH" \
+            "$TXPOWER" \
+            "phy$PHY" \
+            "$ESSID"
+
+    done < "$SSID_FILE"
+
+    printf '  %-6s %-8s %-18s %-8s %-6s %-4s %-6s %-8s %-7s %-36s\n' \
+        "------" \
+        "--------" \
+        "------------------" \
+        "--------" \
+        "------" \
+        "----" \
+        "------" \
+        "--------" \
+        "-------" \
+        "------------------------------------"
+
+    printf '  %-6s %-8s %-18s %-8s %-6s %-4s %-6s %-8s %-7s %-36s\n' \
+        "Total" \
+        "---" \
+        "---" \
+        "$TOTAL_SSID_CLIENTS" \
+        "---" \
+        "---" \
+        "---" \
+        "---" \
+        "---" \
+        "---"
+
+    printf '\n'
+}
+
+# ================================================================
+# MANAGEMENT
+# ================================================================
 
 report_management() {
 
@@ -1571,92 +1734,31 @@ report_management() {
     MANAGEMENT_IP=""
     MANAGEMENT_INT=""
 
-    # ------------------------------------------------------------
-    # First choice: Datto wired management bridge.
-    # ------------------------------------------------------------
+    for D in /sys/class/net/*; do
 
-    if [ -e /sys/class/net/br-wired0 ]; then
+        [ -e "$D" ] || continue
 
-        ADDR="$(management_candidate_ip "br-wired0")"
+        INT="${D##*/}"
 
-        if [ -n "$ADDR" ]; then
-            MANAGEMENT_IP="$ADDR"
-            MANAGEMENT_INT="br-wired0"
-        fi
-    fi
+        case "$INT" in
+            lo|bat*|br-*|erspan*|ifb*|miireg|teql*|survey|wlan*)
+                continue
+                ;;
+        esac
 
-    # ------------------------------------------------------------
-    # Second choice: interface used by the default route.
-    # ------------------------------------------------------------
+        ADDR="$(get_ipv4 "$INT")"
 
-    if [ -z "$MANAGEMENT_IP" ]; then
+        case "$ADDR" in
+            ""|127.*)
+                continue
+                ;;
+        esac
 
-        DEFAULT_INT="$(get_default_route_interface)"
+        MANAGEMENT_IP="$ADDR"
+        MANAGEMENT_INT="$INT"
 
-        if [ -n "$DEFAULT_INT" ]; then
-
-            ADDR="$(management_candidate_ip "$DEFAULT_INT")"
-
-            if [ -n "$ADDR" ]; then
-                MANAGEMENT_IP="$ADDR"
-                MANAGEMENT_INT="$DEFAULT_INT"
-            fi
-        fi
-    fi
-
-    # ------------------------------------------------------------
-    # Third choice: physical Ethernet interface.
-    # ------------------------------------------------------------
-
-    if [ -z "$MANAGEMENT_IP" ]; then
-
-        for D in /sys/class/net/*; do
-
-            [ -e "$D" ] || continue
-
-            INT="${D##*/}"
-
-            is_physical_ethernet "$INT" || continue
-
-            ADDR="$(management_candidate_ip "$INT")"
-
-            if [ -n "$ADDR" ]; then
-                MANAGEMENT_IP="$ADDR"
-                MANAGEMENT_INT="$INT"
-                break
-            fi
-        done
-    fi
-
-    # ------------------------------------------------------------
-    # Final fallback:
-    # Look for other non-SSID interfaces/bridges with IPv4.
-    # Avoid selecting internal SSID bridge addresses.
-    # ------------------------------------------------------------
-
-    if [ -z "$MANAGEMENT_IP" ]; then
-
-        for D in /sys/class/net/*; do
-
-            [ -e "$D" ] || continue
-
-            INT="${D##*/}"
-
-            case "$INT" in
-                lo|br-ssid*|br-ssid*_vlan|bat*|erspan*|ifb*|miireg|teql*|survey|wlan*)
-                    continue
-                    ;;
-            esac
-
-            ADDR="$(management_candidate_ip "$INT")"
-
-            if [ -n "$ADDR" ]; then
-                MANAGEMENT_IP="$ADDR"
-                MANAGEMENT_INT="$INT"
-                break
-            fi
-        done
-    fi
+        break
+    done
 
     printf '  %-25s ' "Management IP"
 
@@ -1813,6 +1915,7 @@ printf '  Nooralyzer version : %s\n' "$VERSION"
 printf '  Host               : %s\n' "$(get_hostname)"
 printf '  Started            : %s\n' \
     "$(date -u '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null)"
+
 printf '  Mode               : Diagnose . Detect . Troubleshoot\n'
 
 # ================================================================
@@ -1831,6 +1934,7 @@ report_processes
 report_logs
 report_radios
 radio_busy_time
+report_ssid_interfaces
 report_clients
 report_summary
 
