@@ -1,7 +1,7 @@
 #!/bin/sh
 
 # ================================================================
-# NOORALYZER v1.5
+# NOORALYZER v1.5.1
 # DNET AP Diagnostic & Troubleshooting Tool
 #
 # Read-only diagnostics for Datto/Kaseya Networking APs
@@ -11,7 +11,7 @@
 # curl -fsSL https://raw.githubusercontent.com/Noorcyber/Nooralyzer/main/Nooralyzer | sh
 # ================================================================
 
-VERSION="1.5"
+VERSION="1.5.1"
 TMP_BASE="/tmp/nooralyzer.$$"
 
 # ================================================================
@@ -179,366 +179,6 @@ get_duplex() {
 }
 
 # ================================================================
-# ETHERNET CAPABILITY / UPLINK / POE HELPERS
-# ================================================================
-
-# Return the current negotiated speed in Mbps.
-#
-# Primary source:
-#   /sys/class/net/<interface>/speed
-#
-# ethtool is used as a fallback.
-
-get_current_speed() {
-    INT="$1"
-
-    SPEED="$(get_speed "$INT")"
-
-    case "$SPEED" in
-        ""|-1|0|65535)
-            SPEED=""
-            ;;
-    esac
-
-    if [ -n "$SPEED" ]; then
-        printf '%s\n' "$SPEED"
-        return
-    fi
-
-    if have ethtool; then
-        SPEED="$(
-            ethtool "$INT" 2>/dev/null |
-            awk -F': ' '
-                /^Speed:/ {
-                    gsub(/Mb\/s/,"",$2)
-                    gsub(/Gb\/s/,"",$2)
-
-                    if ($0 ~ /Gb\/s/) {
-                        printf "%.0f",$2*1000
-                    } else {
-                        print $2
-                    }
-
-                    exit
-                }
-            '
-        )"
-
-        case "$SPEED" in
-            ""|-1|0|65535)
-                ;;
-            *)
-                printf '%s\n' "$SPEED"
-                return
-                ;;
-        esac
-    fi
-
-    printf 'N/A\n'
-}
-
-# Return the maximum advertised/supported Ethernet speed.
-#
-# ethtool is preferred because it can expose 10/100/1000/2500
-# capability even when the current link is slower.
-#
-# Examples:
-#   Current: 100 Mbps
-#   Maximum: 1000 Mbps
-#
-# This is what allows Nooralyzer to flag a cable/link that is
-# negotiating below the interface's maximum capability.
-
-get_max_speed() {
-    INT="$1"
-
-    MAX_SPEED=""
-
-    if have ethtool; then
-
-        MAX_SPEED="$(
-            ethtool "$INT" 2>/dev/null |
-            awk '
-                /Supported link modes:/ {
-                    MODE=1
-                    next
-                }
-
-                MODE && /^[[:space:]]/ {
-                    for(i=1;i<=NF;i++) {
-                        ITEM=$i
-
-                        if (ITEM ~ /^10base/) {
-                            if (10 > MAX) MAX=10
-                        }
-
-                        if (ITEM ~ /^100base/) {
-                            if (100 > MAX) MAX=100
-                        }
-
-                        if (ITEM ~ /^1000base/) {
-                            if (1000 > MAX) MAX=1000
-                        }
-
-                        if (ITEM ~ /^2500base/) {
-                            if (2500 > MAX) MAX=2500
-                        }
-
-                        if (ITEM ~ /^5000base/) {
-                            if (5000 > MAX) MAX=5000
-                        }
-
-                        if (ITEM ~ /^10000base/) {
-                            if (10000 > MAX) MAX=10000
-                        }
-                    }
-
-                    next
-                }
-
-                END {
-                    if (MAX > 0)
-                        print MAX
-                }
-            '
-        )"
-
-        case "$MAX_SPEED" in
-            10|100|1000|2500|5000|10000)
-                printf '%s\n' "$MAX_SPEED"
-                return
-                ;;
-        esac
-
-        # Some ethtool versions expose only the advertised link modes
-        # on one line or use different formatting.
-
-        MAX_SPEED="$(
-            ethtool "$INT" 2>/dev/null |
-            grep -Eo \
-                '10baseT|100baseT|1000baseT|2500baseT|5000baseT|10000baseT' |
-            awk '
-                {
-                    if ($0 ~ /^10base/) max=10
-                    if ($0 ~ /^100base/) max=100
-                    if ($0 ~ /^1000base/) max=1000
-                    if ($0 ~ /^2500base/) max=2500
-                    if ($0 ~ /^5000base/) max=5000
-                    if ($0 ~ /^10000base/) max=10000
-                }
-                END {
-                    if (max > 0)
-                        print max
-                }
-            '
-        )"
-
-        case "$MAX_SPEED" in
-            10|100|1000|2500|5000|10000)
-                printf '%s\n' "$MAX_SPEED"
-                return
-                ;;
-        esac
-    fi
-
-    # If the interface is currently connected and capability cannot
-    # be exposed, do not guess.
-    printf 'N/A\n'
-}
-
-# Determine whether the physical interface is the AP's uplink.
-#
-# First preference:
-#   physical interface associated with the default route.
-#
-# If the default route uses a bridge, inspect bridge members.
-#
-# Final Datto AP fallback:
-#   eth1 is normally the primary Ethernet/uplink port when present.
-#
-# This does NOT mark every Ethernet interface as an uplink.
-
-is_uplink_interface() {
-    INT="$1"
-
-    # Direct default-route interface.
-    if have ip; then
-        DEFAULT_DEV="$(
-            ip route 2>/dev/null |
-            awk '$1=="default" {
-                for(i=1;i<=NF;i++)
-                    if($i=="dev") {
-                        print $(i+1)
-                        exit
-                    }
-            }'
-        )"
-
-        if [ "$DEFAULT_DEV" = "$INT" ]; then
-            return 0
-        fi
-
-        # If the default route points to a bridge, inspect its ports.
-        case "$DEFAULT_DEV" in
-            br-*)
-                if [ -d "/sys/class/net/$DEFAULT_DEV/brif/$INT" ]; then
-                    return 0
-                fi
-                ;;
-        esac
-    fi
-
-    # Management interface fallback.
-    for D in /sys/class/net/*; do
-        [ -e "$D" ] || continue
-
-        DEV="${D##*/}"
-
-        case "$DEV" in
-            lo|br-*|bat*|wlan*|phy*|survey)
-                continue
-                ;;
-        esac
-
-        ADDR="$(get_ipv4 "$DEV")"
-
-        case "$ADDR" in
-            ""|127.*)
-                ;;
-            *)
-                if [ "$DEV" = "$INT" ]; then
-                    return 0
-                fi
-                ;;
-        esac
-    done
-
-    # Datto AP Ethernet port fallback.
-    # eth1 is the primary/uplink port on platforms exposing eth0/eth1.
-    if [ "$INT" = "eth1" ] &&
-       [ -e /sys/class/net/eth1 ]
-    then
-        return 0
-    fi
-
-    return 1
-}
-
-# Attempt to determine PoE information exposed by the platform.
-#
-# We intentionally return N/A when the AP does not expose actual
-# PoE negotiation/status through the available interfaces.
-#
-# Where Datto Wi-Fi 6 AP hardware identifies the primary port as
-# an 802.3at PoE input, report that capability rather than claiming
-# an unverified live negotiation.
-
-get_poe() {
-    INT="$1"
-    MODEL="$(get_model)"
-
-    # Try ethtool PSE/PoE information if supported.
-    if have ethtool; then
-
-        POE_OUTPUT="$(
-            ethtool --show-pse "$INT" 2>/dev/null
-        )"
-
-        if [ -n "$POE_OUTPUT" ]; then
-
-            if printf '%s\n' "$POE_OUTPUT" |
-                grep -qiE '802\.3at|PoE\+|at'
-            then
-                printf '802.3at\n'
-                return
-            fi
-
-            if printf '%s\n' "$POE_OUTPUT" |
-                grep -qiE '802\.3af|PoE'
-            then
-                printf '802.3af\n'
-                return
-            fi
-        fi
-    fi
-
-    # Datto Wi-Fi 6 AP primary Ethernet port.
-    #
-    # Do not claim PoE on secondary ports.
-    case "$MODEL" in
-        *AP440*|*AP840*|*AP840E*)
-            if [ "$INT" = "eth1" ]; then
-                printf '802.3at\n'
-            else
-                printf 'none\n'
-            fi
-            return
-            ;;
-    esac
-
-    printf 'N/A\n'
-}
-
-get_ethernet_warning() {
-    INT="$1"
-    LINK="$2"
-    SPEED="$3"
-    MAX="$4"
-    DUPLEX="$5"
-
-    WARNING=""
-
-    if [ "$LINK" = "DOWN" ]; then
-        printf '%s\n' "-"
-        return
-    fi
-
-    if [ "$LINK" != "UP" ]; then
-        printf '%s\n' "link unavailable"
-        return
-    fi
-
-    if [ "$DUPLEX" = "half" ]; then
-        WARNING="half duplex"
-    fi
-
-    if [ "$SPEED" != "N/A" ] &&
-       [ "$MAX" != "N/A" ] &&
-       [ "$SPEED" -lt "$MAX" ] 2>/dev/null
-    then
-        if [ -n "$WARNING" ]; then
-            WARNING="$WARNING; not max speed"
-        else
-            WARNING="not max speed"
-        fi
-    fi
-
-    if [ -n "$WARNING" ]; then
-        printf '%s\n' "$WARNING"
-    else
-        printf '%s\n' "none"
-    fi
-}
-
-is_physical_ethernet() {
-    INT="$1"
-
-    case "$INT" in
-        eth*|lan*|wan*)
-            ;;
-        *)
-            return 1
-            ;;
-    esac
-
-    [ -e "/sys/class/net/$INT/device" ] || return 1
-
-    [ ! -e "/sys/class/net/$INT/phy80211" ] || return 1
-
-    return 0
-}
-
-# ================================================================
 # SYSTEM
 # ================================================================
 
@@ -620,17 +260,35 @@ report_system() {
 # PHYSICAL ETHERNET
 # ================================================================
 
+is_physical_ethernet() {
+
+    INT="$1"
+
+    case "$INT" in
+        eth*|lan*|wan*)
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    [ -e "/sys/class/net/$INT/device" ] || return 1
+
+    [ ! -e "/sys/class/net/$INT/phy80211" ] || return 1
+
+    return 0
+}
+
 report_wired() {
 
     section "UPLINK / ETHERNET"
 
-    printf '  %-7s %-7s %-11s %-11s %-10s %-9s %-10s %-18s %s\n' \
-        "IF" "LINK" "SPEED" "MAX" "DUPLEX" "UPLINK" "PoE" "MAC" "WARNINGS"
+    printf '  %-8s %-8s %-12s %-10s %-18s %s\n' \
+        "IF" "LINK" "SPEED" "DUPLEX" "MAC" "IPv4"
 
-    printf '  %-7s %-7s %-11s %-11s %-10s %-9s %-10s %-18s %s\n' \
-        "-------" "-------" "-----------" "-----------" \
-        "----------" "---------" "----------" "------------------" \
-        "----------------"
+    printf '  %-8s %-8s %-12s %-10s %-18s %s\n' \
+        "--------" "--------" "------------" "----------" \
+        "------------------" "----------------"
 
     FOUND=0
 
@@ -645,180 +303,43 @@ report_wired() {
         FOUND=1
 
         CARRIER="$(get_carrier "$INT")"
-        SPEED="$(get_current_speed "$INT")"
-        MAX_SPEED="$(get_max_speed "$INT")"
+        SPEED="$(get_speed "$INT")"
         DUPLEX="$(get_duplex "$INT")"
         MAC="$(get_mac "$INT")"
         IPADDR="$(get_ipv4 "$INT")"
 
         [ -n "$MAC" ] || MAC="-"
         [ -n "$IPADDR" ] || IPADDR="-"
-        [ -n "$DUPLEX" ] || DUPLEX="unknown"
+        [ -n "$DUPLEX" ] || DUPLEX="N/A"
 
         case "$CARRIER" in
-            1)
-                LINK="UP"
-                ;;
-            0)
-                LINK="DOWN"
-                ;;
-            *)
-                LINK="?"
-                ;;
+            1) LINK="UP" ;;
+            0) LINK="DOWN" ;;
+            *) LINK="?" ;;
         esac
 
         case "$SPEED" in
-            ""|-1|0|65535)
+            ""|-1|0)
                 SPEED="N/A"
                 ;;
-        esac
-
-        case "$MAX_SPEED" in
-            ""|-1|0|65535)
-                MAX_SPEED="N/A"
-                ;;
-        esac
-
-        case "$SPEED" in
-            N/A)
-                SPEED_DISPLAY="N/A"
-                ;;
             *)
-                SPEED_DISPLAY="${SPEED} Mbps"
+                SPEED="${SPEED} Mbps"
                 ;;
         esac
 
-        case "$MAX_SPEED" in
-            N/A)
-                MAX_DISPLAY="N/A"
-                ;;
-            *)
-                MAX_DISPLAY="${MAX_SPEED} Mbps"
-                ;;
-        esac
-
-        if is_uplink_interface "$INT"; then
-            UPLINK="YES"
-            UPLINK_COLOR="$C_GREEN"
-        else
-            UPLINK="NO"
-            UPLINK_COLOR="$C_DIM"
-        fi
-
-        POE="$(get_poe "$INT")"
-
-        [ -n "$POE" ] || POE="N/A"
-
-        WARNING="$(get_ethernet_warning \
-            "$INT" \
-            "$LINK" \
-            "$SPEED" \
-            "$MAX_SPEED" \
-            "$DUPLEX")"
-
-        # --------------------------------------------------------
-        # LINK COLOR
-        # --------------------------------------------------------
-
-        case "$LINK" in
-            UP)
-                LINK_COLOR="$C_GREEN"
-                ;;
-            DOWN)
-                LINK_COLOR="$C_RED"
-                ;;
-            *)
-                LINK_COLOR="$C_YELLOW"
-                ;;
-        esac
-
-        # --------------------------------------------------------
-        # SPEED COLOR
-        # --------------------------------------------------------
-
-        SPEED_COLOR="$C_WHITE"
-
-        if [ "$LINK" = "UP" ] &&
-           [ "$SPEED" != "N/A" ] &&
-           [ "$MAX_SPEED" != "N/A" ] &&
-           [ "$SPEED" -lt "$MAX_SPEED" ] 2>/dev/null
-        then
-            SPEED_COLOR="$C_YELLOW"
-        elif [ "$SPEED" = "10" ]; then
-            SPEED_COLOR="$C_RED"
-        fi
-
-        # --------------------------------------------------------
-        # WARNING COLOR
-        # --------------------------------------------------------
-
-        case "$WARNING" in
-            none|-)
-                WARNING_COLOR="$C_GREEN"
-                ;;
-            "not max speed")
-                WARNING_COLOR="$C_YELLOW"
-                ;;
-            "half duplex")
-                WARNING_COLOR="$C_RED"
-                ;;
-            *)
-                WARNING_COLOR="$C_YELLOW"
-                ;;
-        esac
-
-        # --------------------------------------------------------
-        # DISPLAY
-        # --------------------------------------------------------
-
-        printf '  %-7s ' "$INT"
-
-        printf '%s%-7s%s ' \
-            "$LINK_COLOR" \
-            "$LINK" \
-            "$C_RESET"
-
-        printf '%s%-11s%s ' \
-            "$SPEED_COLOR" \
-            "$SPEED_DISPLAY" \
-            "$C_RESET"
-
-        printf '%-11s %-10s ' \
-            "$MAX_DISPLAY" \
-            "$DUPLEX"
-
-        printf '%s%-9s%s ' \
-            "$UPLINK_COLOR" \
-            "$UPLINK" \
-            "$C_RESET"
-
-        printf '%-10s %-18s ' \
-            "$POE" \
-            "$MAC"
-
-        printf '%s%s%s\n' \
-            "$WARNING_COLOR" \
-            "$WARNING" \
-            "$C_RESET"
-
-        # --------------------------------------------------------
-        # DIAGNOSTIC WARNINGS
-        # --------------------------------------------------------
+        printf '  %-8s %-8s %-12s %-10s %-18s %s\n' \
+            "$INT" "$LINK" "$SPEED" "$DUPLEX" "$MAC" "$IPADDR"
 
         if [ "$LINK" = "UP" ]; then
 
-            if [ "$SPEED" = "10" ]; then
-                issue "$INT negotiated at only 10 Mbps"
-            elif [ "$SPEED" = "100" ]; then
-                warn "$INT negotiated at 100 Mbps"
-            fi
-
-            if [ "$SPEED" != "N/A" ] &&
-               [ "$MAX_SPEED" != "N/A" ] &&
-               [ "$SPEED" -lt "$MAX_SPEED" ] 2>/dev/null
-            then
-                warn "$INT is running at ${SPEED} Mbps but supports up to ${MAX_SPEED} Mbps"
-            fi
+            case "$SPEED" in
+                "10 Mbps")
+                    issue "$INT negotiated at only 10 Mbps"
+                    ;;
+                "100 Mbps")
+                    warn "$INT negotiated at 100 Mbps"
+                    ;;
+            esac
 
             if [ "$DUPLEX" = "half" ]; then
                 issue "$INT is running HALF duplex"
@@ -955,29 +476,44 @@ ping_test() {
         return 1
     fi
 
-    LOSS="$(
-        awk -F',' '
-            /packet loss/ {
-                gsub(/%/,"",$3)
-                gsub(/ /,"",$3)
-                print $3
-                exit
-            }
-        ' "$PING_FILE" 2>/dev/null
-    )"
+    # BusyBox/OpenWrt ping output can look like:
+    #
+    # 3 packets transmitted, 3 packets received, 0% packet loss
+    #
+    # The previous parser incorrectly returned "0packetloss".
+    # This parser specifically extracts the numeric percentage
+    # immediately before "% packet loss".
 
-    LATENCY="$(
-        awk -F'=' '
-            /round-trip|rtt/ {
-                gsub(/ /,"",$2)
-                split($2,A,"/")
-                print A[2]
-                exit
+    LOSS="$(awk '
+        /packet loss/ {
+            for (i=1; i<=NF; i++) {
+                if ($i ~ /^[0-9]+([.][0-9]+)?%$/) {
+                    gsub(/%/, "", $i)
+                    print $i
+                    exit
+                }
             }
-        ' "$PING_FILE" 2>/dev/null
-    )"
+        }
+    ' "$PING_FILE" 2>/dev/null)"
 
-    [ -n "$LOSS" ] || LOSS="0"
+    # Fallback parser for alternate ping formatting.
+    if [ -z "$LOSS" ]; then
+        LOSS="$(sed -n \
+            's/.*,\([0-9][0-9.]*\)%[[:space:]]*packet loss.*/\1/p' \
+            "$PING_FILE" 2>/dev/null |
+            head -n 1)"
+    fi
+
+    LATENCY="$(awk -F'=' '
+        /round-trip|rtt/ {
+            gsub(/ /,"",$2)
+            split($2,A,"/")
+            print A[2]
+            exit
+        }
+    ' "$PING_FILE" 2>/dev/null)"
+
+    [ -n "$LOSS" ] || LOSS="N/A"
     [ -n "$LATENCY" ] || LATENCY="N/A"
 
     printf '%s|%s' "$LOSS" "$LATENCY"
@@ -1024,6 +560,8 @@ report_connectivity() {
 
             if [ "$LOSS" = "0" ] || [ "$LOSS" = "0.0" ]; then
                 ok "Reachable - ${LATENCY} ms average"
+            elif [ "$LOSS" = "N/A" ]; then
+                warn "Gateway reachable but packet loss could not be determined"
             else
                 warn "Gateway packet loss: ${LOSS}%"
             fi
@@ -1048,6 +586,8 @@ report_connectivity() {
 
             if [ "$LOSS" = "0" ] || [ "$LOSS" = "0.0" ]; then
                 ok "Reachable - ${LATENCY} ms average"
+            elif [ "$LOSS" = "N/A" ]; then
+                warn "Internet reachable but packet loss could not be determined"
             else
                 warn "Internet packet loss: ${LOSS}%"
             fi
@@ -1063,14 +603,12 @@ report_connectivity() {
 
     if [ -s /etc/resolv.conf ]; then
 
-        DNS_SERVERS="$(
-            awk '
-                /^[[:space:]]*nameserver[[:space:]]+/ {
-                    if(n++) printf ", "
-                    printf $2
-                }
-            ' /etc/resolv.conf 2>/dev/null
-        )"
+        DNS_SERVERS="$(awk '
+            /^[[:space:]]*nameserver[[:space:]]+/ {
+                if(n++) printf ", "
+                printf $2
+            }
+        ' /etc/resolv.conf 2>/dev/null)"
 
     fi
 
@@ -1160,10 +698,8 @@ report_network_state() {
 
         ROUTES="$(ip route 2>/dev/null)"
 
-        DEFAULT="$(
-            printf '%s\n' "$ROUTES" |
-            awk '$1=="default"{print $0; exit}'
-        )"
+        DEFAULT="$(printf '%s\n' "$ROUTES" |
+            awk '$1=="default"{print $0; exit}')"
 
         printf '  %-25s ' "Default route"
 
@@ -1197,9 +733,9 @@ report_network_state() {
         printf '  %-25s ' "Failed neighbors"
 
         if [ "$FAILED" -gt 0 ] 2>/dev/null; then
-            warn "$FAILED FAILED neighbor(s)"
+            warn "$FAILED unresolved neighbor entries detected"
         else
-            ok "0"
+            ok "0 unresolved neighbor entries"
         fi
 
     else
@@ -1982,6 +1518,56 @@ report_clients() {
 # MANAGEMENT
 # ================================================================
 
+# Determine the most likely management interface.
+#
+# Priority:
+# 1. br-wired0 - Datto AP wired/management bridge when exposed.
+# 2. Interface used by the default route.
+# 3. Physical Ethernet interface with an IPv4 address.
+# 4. Other non-SSID bridge/interface with an IPv4 address.
+#
+# This avoids incorrectly reporting "No IPv4 management address"
+# simply because the management address lives on br-wired0.
+
+get_default_route_interface() {
+
+    if have ip; then
+        ip route 2>/dev/null |
+            awk '
+                $1=="default" {
+                    for(i=1;i<=NF;i++) {
+                        if($i=="dev") {
+                            print $(i+1)
+                            exit
+                        }
+                    }
+                }
+            '
+    fi
+}
+
+management_candidate_ip() {
+
+    INT="$1"
+
+    case "$INT" in
+        ""|lo)
+            return 1
+            ;;
+    esac
+
+    ADDR="$(get_ipv4 "$INT")"
+
+    case "$ADDR" in
+        ""|127.*)
+            return 1
+            ;;
+    esac
+
+    printf '%s\n' "$ADDR"
+    return 0
+}
+
 report_management() {
 
     section "MANAGEMENT CONNECTIVITY"
@@ -1989,31 +1575,92 @@ report_management() {
     MANAGEMENT_IP=""
     MANAGEMENT_INT=""
 
-    for D in /sys/class/net/*; do
+    # ------------------------------------------------------------
+    # First choice: Datto wired management bridge.
+    # ------------------------------------------------------------
 
-        [ -e "$D" ] || continue
+    if [ -e /sys/class/net/br-wired0 ]; then
 
-        INT="${D##*/}"
+        ADDR="$(management_candidate_ip "br-wired0")"
 
-        case "$INT" in
-            lo|bat*|br-*|erspan*|ifb*|miireg|teql*|survey|wlan*)
-                continue
-                ;;
-        esac
+        if [ -n "$ADDR" ]; then
+            MANAGEMENT_IP="$ADDR"
+            MANAGEMENT_INT="br-wired0"
+        fi
+    fi
 
-        ADDR="$(get_ipv4 "$INT")"
+    # ------------------------------------------------------------
+    # Second choice: interface used by the default route.
+    # ------------------------------------------------------------
 
-        case "$ADDR" in
-            ""|127.*)
-                continue
-                ;;
-        esac
+    if [ -z "$MANAGEMENT_IP" ]; then
 
-        MANAGEMENT_IP="$ADDR"
-        MANAGEMENT_INT="$INT"
+        DEFAULT_INT="$(get_default_route_interface)"
 
-        break
-    done
+        if [ -n "$DEFAULT_INT" ]; then
+
+            ADDR="$(management_candidate_ip "$DEFAULT_INT")"
+
+            if [ -n "$ADDR" ]; then
+                MANAGEMENT_IP="$ADDR"
+                MANAGEMENT_INT="$DEFAULT_INT"
+            fi
+        fi
+    fi
+
+    # ------------------------------------------------------------
+    # Third choice: physical Ethernet interface.
+    # ------------------------------------------------------------
+
+    if [ -z "$MANAGEMENT_IP" ]; then
+
+        for D in /sys/class/net/*; do
+
+            [ -e "$D" ] || continue
+
+            INT="${D##*/}"
+
+            is_physical_ethernet "$INT" || continue
+
+            ADDR="$(management_candidate_ip "$INT")"
+
+            if [ -n "$ADDR" ]; then
+                MANAGEMENT_IP="$ADDR"
+                MANAGEMENT_INT="$INT"
+                break
+            fi
+        done
+    fi
+
+    # ------------------------------------------------------------
+    # Final fallback:
+    # Look for other non-SSID interfaces/bridges with IPv4.
+    # Avoid selecting internal SSID bridge addresses.
+    # ------------------------------------------------------------
+
+    if [ -z "$MANAGEMENT_IP" ]; then
+
+        for D in /sys/class/net/*; do
+
+            [ -e "$D" ] || continue
+
+            INT="${D##*/}"
+
+            case "$INT" in
+                lo|br-ssid*|br-ssid*_vlan|bat*|erspan*|ifb*|miireg|teql*|survey|wlan*)
+                    continue
+                    ;;
+            esac
+
+            ADDR="$(management_candidate_ip "$INT")"
+
+            if [ -n "$ADDR" ]; then
+                MANAGEMENT_IP="$ADDR"
+                MANAGEMENT_INT="$INT"
+                break
+            fi
+        done
+    fi
 
     printf '  %-25s ' "Management IP"
 
@@ -2153,7 +1800,7 @@ printf '%s\n' '░████   ░██                                     �
 printf '%s\n' '░██░██  ░██ ░███████  ░███████ ░██░████░██████  ░██░██    ░██░█████████░███████ ░██░████'
 printf '%s\n' '░██ ░██ ░██░██    ░██░██    ░██░███         ░██ ░██░██    ░██     ░███░██    ░██░███    '
 printf '%s\n' '░██  ░██░██░██    ░██░██    ░██░██     ░███████ ░██░██    ░██   ░███  ░█████████░██     '
-printf '%s\n' '░██   ░███░██    ░██░██    ░██░██    ░██   ░██ ░██░██   ░███ ░███    ░██       ░██     '
+printf '%s\n' '░██   ░████░██    ░██░██    ░██░██    ░██   ░██ ░██░██   ░███ ░███    ░██       ░██     '
 printf '%s\n' '░██    ░███ ░███████  ░███████ ░██     ░█████░██░██ ░█████░██░█████████░███████ ░██     '
 printf '%s\n' '                                                          ░██                           '
 printf '%s\n' '                                                    ░███████                            '
@@ -2168,7 +1815,8 @@ printf '\n'
 
 printf '  Nooralyzer version : %s\n' "$VERSION"
 printf '  Host               : %s\n' "$(get_hostname)"
-printf '  Started            : %s\n' "$(date -u '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null)"
+printf '  Started            : %s\n' \
+    "$(date -u '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null)"
 printf '  Mode               : Diagnose . Detect . Troubleshoot\n'
 
 # ================================================================
