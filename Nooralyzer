@@ -1,17 +1,17 @@
 #!/bin/sh
-#
+
 # ================================================================
-# NOORALYZER v1.5
+# NOORALYZER v1.6
 # DNET AP Diagnostic & Troubleshooting Tool
 #
 # Read-only diagnostics for Datto/Kaseya Networking APs
 # running OpenWrt / BusyBox.
 #
 # Run:
-#   curl -fsSL https://raw.githubusercontent.com/Noorcyber/Nooralyzer/main/Nooralyzer | sh
+# curl -fsSL https://raw.githubusercontent.com/Noorcyber/Nooralyzer/main/Nooralyzer | sh
 # ================================================================
 
-VERSION="1.5"
+VERSION="1.6"
 TMP_BASE="/tmp/nooralyzer.$$"
 
 # ================================================================
@@ -124,8 +124,8 @@ get_model() {
 
 # Datto AP firmware version
 # The AP firmware is exposed through /etc/fw_core_version.
-get_firmware() {
 
+get_firmware() {
     if [ -r /etc/fw_core_version ]; then
         tr -d '[:space:]' < /etc/fw_core_version 2>/dev/null
     else
@@ -176,6 +176,90 @@ get_speed() {
 
 get_duplex() {
     read_sys "/sys/class/net/$1/duplex"
+}
+
+# ================================================================
+# ETHERNET CAPABILITY
+# ================================================================
+# Returns the highest supported Ethernet speed reported by
+# ethtool.
+#
+# CAPABILITY = what the Ethernet interface supports.
+# SPEED      = what the interface is currently negotiating.
+#
+# If ethtool is unavailable, capability is reported as N/A.
+# ================================================================
+
+get_supported_speed() {
+    INT="$1"
+
+    if ! have ethtool; then
+        printf 'N/A\n'
+        return
+    fi
+
+    ETHTOOL_OUT="$(
+        ethtool "$INT" 2>/dev/null
+    )"
+
+    [ -n "$ETHTOOL_OUT" ] || {
+        printf 'N/A\n'
+        return
+    }
+
+    MAX_SPEED="$(
+        printf '%s\n' "$ETHTOOL_OUT" |
+        awk '
+            BEGIN {
+                max=0
+                IN_SUPPORTED=0
+            }
+
+            /Supported link modes:/ {
+                IN_SUPPORTED=1
+                next
+            }
+
+            IN_SUPPORTED && /^[^[:space:]]/ {
+                IN_SUPPORTED=0
+            }
+
+            IN_SUPPORTED {
+                if ($0 ~ /25000base/) {
+                    if (max < 25000) max=25000
+                }
+                else if ($0 ~ /10000base/) {
+                    if (max < 10000) max=10000
+                }
+                else if ($0 ~ /5000base/) {
+                    if (max < 5000) max=5000
+                }
+                else if ($0 ~ /2500base/) {
+                    if (max < 2500) max=2500
+                }
+                else if ($0 ~ /1000base/) {
+                    if (max < 1000) max=1000
+                }
+                else if ($0 ~ /100base/) {
+                    if (max < 100) max=100
+                }
+                else if ($0 ~ /10base/) {
+                    if (max < 10) max=10
+                }
+            }
+
+            END {
+                if (max > 0)
+                    print max
+            }
+        '
+    )"
+
+    if [ -n "$MAX_SPEED" ]; then
+        printf '%s Mbps\n' "$MAX_SPEED"
+    else
+        printf 'N/A\n'
+    fi
 }
 
 # ================================================================
@@ -283,11 +367,11 @@ report_wired() {
 
     section "UPLINK / ETHERNET"
 
-    printf '  %-8s %-8s %-12s %-10s %-18s %s\n' \
-        "IF" "LINK" "SPEED" "DUPLEX" "MAC" "IPv4"
+    printf '  %-8s %-8s %-13s %-13s %-10s %-18s %s\n' \
+        "IF" "LINK" "CAPABILITY" "SPEED" "DUPLEX" "MAC" "IPv4"
 
-    printf '  %-8s %-8s %-12s %-10s %-18s %s\n' \
-        "--------" "--------" "------------" "----------" \
+    printf '  %-8s %-8s %-13s %-13s %-10s %-18s %s\n' \
+        "--------" "--------" "-------------" "-------------" "----------" \
         "------------------" "----------------"
 
     FOUND=0
@@ -304,6 +388,7 @@ report_wired() {
 
         CARRIER="$(get_carrier "$INT")"
         SPEED="$(get_speed "$INT")"
+        CAPABILITY="$(get_supported_speed "$INT")"
         DUPLEX="$(get_duplex "$INT")"
         MAC="$(get_mac "$INT")"
         IPADDR="$(get_ipv4 "$INT")"
@@ -319,7 +404,7 @@ report_wired() {
         esac
 
         case "$SPEED" in
-            ""|-1|0)
+            ""|-1|0|65535)
                 SPEED="N/A"
                 ;;
             *)
@@ -327,8 +412,8 @@ report_wired() {
                 ;;
         esac
 
-        printf '  %-8s %-8s %-12s %-10s %-18s %s\n' \
-            "$INT" "$LINK" "$SPEED" "$DUPLEX" "$MAC" "$IPADDR"
+        printf '  %-8s %-8s %-13s %-13s %-10s %-18s %s\n' \
+            "$INT" "$LINK" "$CAPABILITY" "$SPEED" "$DUPLEX" "$MAC" "$IPADDR"
 
         if [ "$LINK" = "UP" ]; then
 
@@ -343,6 +428,43 @@ report_wired() {
 
             if [ "$DUPLEX" = "half" ]; then
                 issue "$INT is running HALF duplex"
+            fi
+
+            # Detect a lower-than-capable negotiated link.
+            # This is especially useful for identifying a 100 Mbps
+            # negotiation on hardware/cabling expected to support 1 Gbps.
+            if [ "$CAPABILITY" != "N/A" ] &&
+               [ "$SPEED" != "N/A" ] &&
+               [ "$CAPABILITY" != "$SPEED" ]
+            then
+
+                case "$CAPABILITY:$SPEED" in
+
+                    "1000 Mbps:100 Mbps")
+                        warn "$INT negotiated at 100 Mbps but supports up to 1000 Mbps; check cable and switch port"
+                        ;;
+
+                    "1000 Mbps:10 Mbps")
+                        warn "$INT negotiated at 10 Mbps but supports up to 1000 Mbps; check cable and switch port"
+                        ;;
+
+                    "2500 Mbps:1000 Mbps")
+                        warn "$INT negotiated at 1000 Mbps but supports up to 2500 Mbps; check cable and switch port"
+                        ;;
+
+                    "2500 Mbps:100 Mbps")
+                        warn "$INT negotiated at 100 Mbps but supports up to 2500 Mbps; check cable and switch port"
+                        ;;
+
+                    "10000 Mbps:1000 Mbps")
+                        warn "$INT negotiated at 1000 Mbps but supports up to 10000 Mbps; check cable and switch port"
+                        ;;
+
+                    "10000 Mbps:100 Mbps")
+                        warn "$INT negotiated at 100 Mbps but supports up to 10000 Mbps; check cable and switch port"
+                        ;;
+
+                esac
             fi
         fi
     done
@@ -988,20 +1110,7 @@ get_txpower() {
 }
 
 # ================================================================
-# FIXED RADIO BUSY TIME
-#
-# Uses the survey record marked "[in use]" first.
-#
-# A PHY can contain multiple AP interfaces. The survey belongs to
-# the radio/PHY, not independently to every SSID/VAP.
-#
-# We therefore:
-#   1. Try the primary AP interface.
-#   2. Try other interfaces belonging to the same PHY.
-#   3. Prefer the survey record marked [in use].
-#   4. Fall back to the first valid survey record if [in use]
-#      is not exposed by the driver.
-#   5. Never divide by zero.
+# RADIO BUSY TIME
 # ================================================================
 
 get_busy_from_survey() {
@@ -1010,8 +1119,6 @@ get_busy_from_survey() {
 
     [ -n "$SURVEY_DATA" ] || return 1
 
-    # First pass:
-    # Use the survey entry explicitly marked [in use].
     BUSY_PCT="$(
         printf '%s\n' "$SURVEY_DATA" |
         awk '
@@ -1053,9 +1160,6 @@ get_busy_from_survey() {
         return 0
     fi
 
-    # Second pass:
-    # Some older drivers do not expose "[in use]".
-    # Use the first complete valid survey record.
     BUSY_PCT="$(
         printf '%s\n' "$SURVEY_DATA" |
         awk '
@@ -1104,10 +1208,6 @@ get_busy() {
     IF="$1"
     PHY="$2"
 
-    # ------------------------------------------------------------
-    # First try the interface currently associated with the PHY.
-    # ------------------------------------------------------------
-
     if [ -n "$IF" ]; then
 
         SURVEY="$(
@@ -1121,13 +1221,6 @@ get_busy() {
             return 0
         fi
     fi
-
-    # ------------------------------------------------------------
-    # Try every interface attached to this PHY.
-    #
-    # This is important on Datto APs because multiple AP/VAP
-    # interfaces can share the same physical radio.
-    # ------------------------------------------------------------
 
     if [ -n "$PHY" ] &&
        [ -d "/sys/class/ieee80211/phy$PHY/device/net" ]
@@ -1710,9 +1803,7 @@ printf '\n'
 
 printf '  Nooralyzer version : %s\n' "$VERSION"
 printf '  Host               : %s\n' "$(get_hostname)"
-printf '  Started            : %s\n' \
-    "$(date -u '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null)"
-
+printf '  Started            : %s\n' "$(date -u '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null)"
 printf '  Mode               : Diagnose . Detect . Troubleshoot\n'
 
 # ================================================================
