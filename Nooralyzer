@@ -63,10 +63,24 @@ binary_exists() {
     [ -x "/sbin/$1" ]
 }
 
+# Standard 70-character section
 section() {
-    printf '\n%s+----------------------------------------------------------------------+%s\n' "$C_CYAN" "$C_RESET"
-    printf '%s| %-68s |%s\n' "$C_CYAN" "$1" "$C_RESET"
-    printf '%s+----------------------------------------------------------------------+%s\n' "$C_CYAN" "$C_RESET"
+    printf '\n%s+----------------------------------------------------------------------+%s\n' \
+        "$C_CYAN" "$C_RESET"
+    printf '%s| %-68s |%s\n' \
+        "$C_CYAN" "$1" "$C_RESET"
+    printf '%s+----------------------------------------------------------------------+%s\n' \
+        "$C_CYAN" "$C_RESET"
+}
+
+# Wide section used only for tables that genuinely need more room
+section_wide() {
+    printf '\n%s+------------------------------------------------------------------------------------------------------------------------+%s\n' \
+        "$C_CYAN" "$C_RESET"
+    printf '%s| %-118s |%s\n' \
+        "$C_CYAN" "$1" "$C_RESET"
+    printf '%s+------------------------------------------------------------------------------------------------------------------------+%s\n' \
+        "$C_CYAN" "$C_RESET"
 }
 
 kv() {
@@ -117,9 +131,6 @@ get_model() {
         echo "unknown"
     fi
 }
-
-# Datto AP firmware version
-# The AP firmware is exposed through /etc/fw_core_version.
 
 get_firmware() {
     if [ -r /etc/fw_core_version ]; then
@@ -275,16 +286,82 @@ is_physical_ethernet() {
     return 0
 }
 
+# ================================================================
+# ETHERNET MAX CAPABILITY
+# ================================================================
+
+get_capability() {
+
+    INT="$1"
+
+    # Prefer ethtool because it exposes supported link modes.
+    if have ethtool; then
+
+        CAP="$(
+            ethtool "$INT" 2>/dev/null |
+            awk '
+                /Supported link modes:/ {
+                    START=1
+                    next
+                }
+
+                START {
+                    if ($0 !~ /^[[:space:]]/) {
+                        START=0
+                        next
+                    }
+
+                    for (i=1; i<=NF; i++) {
+                        if ($i ~ /^[0-9]+base[TXF]+\/?[Ff]?[Hh]?$/) {
+                            V=$i
+                            sub(/base.*/, "", V)
+                            if (V+0 > MAX)
+                                MAX=V+0
+                        }
+                    }
+                }
+
+                END {
+                    if (MAX > 0)
+                        print MAX
+                }
+            '
+        )"
+
+        if [ -n "$CAP" ]; then
+            printf '%s Mbps\n' "$CAP"
+            return 0
+        fi
+
+        # Alternative ethtool format.
+        CAP="$(
+            ethtool "$INT" 2>/dev/null |
+            grep -Eo '[0-9]+(base10|base100|base1000|base2500|base5000|base10000)' |
+            sed 's/base.*//' |
+            sort -n |
+            tail -n 1
+        )"
+
+        if [ -n "$CAP" ]; then
+            printf '%s Mbps\n' "$CAP"
+            return 0
+        fi
+    fi
+
+    printf 'N/A\n'
+}
+
 report_wired() {
 
-    section "UPLINK / ETHERNET"
+    # Wide because capability was added to the Ethernet table.
+    section_wide "UPLINK / ETHERNET"
 
-    printf '  %-8s %-8s %-12s %-10s %-18s %s\n' \
-        "IF" "LINK" "SPEED" "DUPLEX" "MAC" "IPv4"
+    printf '  %-8s %-8s %-12s %-13s %-10s %-18s %s\n' \
+        "IF" "LINK" "CAPABILITY" "SPEED" "DUPLEX" "MAC" "IPv4"
 
-    printf '  %-8s %-8s %-12s %-10s %-18s %s\n' \
-        "--------" "--------" "------------" "----------" \
-        "------------------" "----------------"
+    printf '  %-8s %-8s %-12s %-13s %-10s %-18s %s\n' \
+        "--------" "--------" "------------" "-------------" \
+        "----------" "------------------" "----------------"
 
     FOUND=0
 
@@ -301,12 +378,14 @@ report_wired() {
         CARRIER="$(get_carrier "$INT")"
         SPEED="$(get_speed "$INT")"
         DUPLEX="$(get_duplex "$INT")"
+        CAPABILITY="$(get_capability "$INT")"
         MAC="$(get_mac "$INT")"
         IPADDR="$(get_ipv4 "$INT")"
 
         [ -n "$MAC" ] || MAC="-"
         [ -n "$IPADDR" ] || IPADDR="-"
-        [ -n "$DUPLEX" ] || DUPLEX="N/A"
+        [ -n "$DUPLEX" ] || DUPLEX="unknown"
+        [ -n "$CAPABILITY" ] || CAPABILITY="N/A"
 
         case "$CARRIER" in
             1) LINK="UP" ;;
@@ -323,8 +402,8 @@ report_wired() {
                 ;;
         esac
 
-        printf '  %-8s %-8s %-12s %-10s %-18s %s\n' \
-            "$INT" "$LINK" "$SPEED" "$DUPLEX" "$MAC" "$IPADDR"
+        printf '  %-8s %-8s %-12s %-13s %-10s %-18s %s\n' \
+            "$INT" "$LINK" "$CAPABILITY" "$SPEED" "$DUPLEX" "$MAC" "$IPADDR"
 
         if [ "$LINK" = "UP" ]; then
 
@@ -339,6 +418,18 @@ report_wired() {
 
             if [ "$DUPLEX" = "half" ]; then
                 issue "$INT is running HALF duplex"
+            fi
+
+            if [ "$CAPABILITY" != "N/A" ] &&
+               [ "$SPEED" != "N/A" ]
+            then
+
+                CAP_NUM="$(printf '%s\n' "$CAPABILITY" | awk '{print $1}')"
+                SPEED_NUM="$(printf '%s\n' "$SPEED" | awk '{print $1}')"
+
+                if [ "$CAP_NUM" -gt "$SPEED_NUM" ] 2>/dev/null; then
+                    warn "$INT is capable of ${CAP_NUM} Mbps but currently negotiated at ${SPEED}"
+                fi
             fi
         fi
     done
@@ -472,23 +563,31 @@ ping_test() {
         return 1
     fi
 
-    LOSS="$(awk -F',' '
-        /packet loss/ {
-            gsub(/%/,"",$3)
-            gsub(/ /,"",$3)
-            print $3
-            exit
-        }
-    ' "$PING_FILE" 2>/dev/null)"
+    LOSS="$(
+        awk -F',' '
+            /packet loss/ {
+                for(i=1;i<=NF;i++) {
+                    if($i ~ /packet loss/) {
+                        gsub(/%/,"",$i)
+                        gsub(/[^0-9.]/,"",$i)
+                        print $i
+                        exit
+                    }
+                }
+            }
+        ' "$PING_FILE" 2>/dev/null
+    )"
 
-    LATENCY="$(awk -F'=' '
-        /round-trip|rtt/ {
-            gsub(/ /,"",$2)
-            split($2,A,"/")
-            print A[2]
-            exit
-        }
-    ' "$PING_FILE" 2>/dev/null)"
+    LATENCY="$(
+        awk -F'=' '
+            /round-trip|rtt/ {
+                gsub(/ /,"",$2)
+                split($2,A,"/")
+                print A[2]
+                exit
+            }
+        ' "$PING_FILE" 2>/dev/null
+    )"
 
     [ -n "$LOSS" ] || LOSS="0"
     [ -n "$LATENCY" ] || LATENCY="N/A"
@@ -576,12 +675,14 @@ report_connectivity() {
 
     if [ -s /etc/resolv.conf ]; then
 
-        DNS_SERVERS="$(awk '
-            /^[[:space:]]*nameserver[[:space:]]+/ {
-                if(n++) printf ", "
-                printf $2
-            }
-        ' /etc/resolv.conf 2>/dev/null)"
+        DNS_SERVERS="$(
+            awk '
+                /^[[:space:]]*nameserver[[:space:]]+/ {
+                    if(n++) printf ", "
+                    printf $2
+                }
+            ' /etc/resolv.conf 2>/dev/null
+        )"
 
     fi
 
@@ -671,8 +772,10 @@ report_network_state() {
 
         ROUTES="$(ip route 2>/dev/null)"
 
-        DEFAULT="$(printf '%s\n' "$ROUTES" |
-            awk '$1=="default"{print $0; exit}')"
+        DEFAULT="$(
+            printf '%s\n' "$ROUTES" |
+            awk '$1=="default"{print $0; exit}'
+        )"
 
         printf '  %-25s ' "Default route"
 
@@ -984,20 +1087,7 @@ get_txpower() {
 }
 
 # ================================================================
-# FIXED RADIO BUSY TIME
-#
-# Uses the survey record marked "[in use]" first.
-#
-# A PHY can contain multiple AP interfaces. The survey belongs to
-# the radio/PHY, not independently to every SSID/VAP.
-#
-# We therefore:
-# 1. Try the primary AP interface.
-# 2. Try other interfaces belonging to the same PHY.
-# 3. Prefer the survey record marked [in use].
-# 4. Fall back to the first valid survey record if [in use]
-#    is not exposed by the driver.
-# 5. Never divide by zero.
+# RADIO BUSY TIME
 # ================================================================
 
 get_busy_from_survey() {
@@ -1350,6 +1440,147 @@ report_radios() {
 }
 
 # ================================================================
+# SSID / WIRELESS INTERFACE INFORMATION
+# ================================================================
+
+get_band() {
+
+    CHANNEL="$1"
+
+    case "$CHANNEL" in
+        1|2|3|4|5|6|7|8|9|10|11|12|13|14)
+            printf '2.4'
+            ;;
+        30|31|32|33|34|35|36|37|38|39|40|41|42|43|44|45|46|47|48|49|50|51|52|53|54|55|56|57|58|59|60|61|62|63|64|100|101|102|103|104|105|106|107|108|109|110|111|112|113|114|115|116|117|118|119|120|121|122|123|124|125|126|127|128|129|130|131|132|133|134|135|136|137|138|139|140|141|142|143|144|145|146|147|148|149|150|151|152|153|154|155|156|157|158|159|160|161|162|163|164|165|166|167|168|169|170|171|172|173|174|175|176|177|178|179|180|181|182|183|184|185|186|187|188|189|190|191|192|193|194|195|196|197|198|199|200|201|202|203|204|205|206|207|208|209|210|211|212|213|214|215|216|217|218|219|220)
+            printf '5'
+            ;;
+        *)
+            printf 'N/A'
+            ;;
+    esac
+}
+
+get_ssid() {
+
+    IF="$1"
+
+    iw dev "$IF" info 2>/dev/null |
+        awk -F': ' '/ssid / {print $2; exit}'
+}
+
+get_bssid() {
+
+    IF="$1"
+
+    iw dev "$IF" info 2>/dev/null |
+        awk '/addr / {print $2; exit}'
+}
+
+get_ssid_clients() {
+
+    IF="$1"
+
+    count_clients "$IF"
+}
+
+report_ssid_interfaces() {
+
+    section_wide "SSID INTERFACES"
+
+    printf '  %-7s %-9s %-18s %-8s %-6s %-4s %-7s %-9s %-7s %-35s\n' \
+        "SSID" "IF" "BSSID" "Clients" "Band" "Ch" "Width" "Tx" "Phy" "ESSID"
+
+    printf '  %-7s %-9s %-18s %-8s %-6s %-4s %-7s %-9s %-7s %-35s\n' \
+        "-------" "---------" "------------------" "--------" \
+        "------" "----" "-------" "---------" "-------" \
+        "-----------------------------------"
+
+    if ! have iw; then
+        skip "iw is not installed"
+        return
+    fi
+
+    SSID_FILE="${TMP_BASE}_ssid"
+
+    get_ap_interfaces > "$SSID_FILE" 2>/dev/null
+
+    if [ ! -s "$SSID_FILE" ]; then
+        skip "No AP-mode wireless interfaces detected"
+        return
+    fi
+
+    TOTAL_CLIENTS=0
+    TOTAL_ROWS=0
+
+    while IFS="$(printf '\t')" read -r PHY INT; do
+
+        [ -n "$INT" ] || continue
+
+        SSID="$(get_ssid "$INT")"
+        BSSID="$(get_bssid "$INT")"
+        CHANNEL="$(get_channel "$INT")"
+        WIDTH="$(get_width "$INT")"
+        TXPOWER="$(get_txpower "$INT")"
+        CLIENTS="$(get_ssid_clients "$INT")"
+        BAND="$(get_band "$CHANNEL")"
+
+        [ -n "$SSID" ] || SSID="N/A"
+        [ -n "$BSSID" ] || BSSID="N/A"
+        [ -n "$CHANNEL" ] || CHANNEL="N/A"
+        [ -n "$WIDTH" ] || WIDTH="N/A"
+        [ -n "$TXPOWER" ] || TXPOWER="N/A"
+        [ -n "$CLIENTS" ] || CLIENTS=0
+        [ -n "$BAND" ] || BAND="N/A"
+
+        # Width returned by iw can include "MHz".
+        WIDTH_DISPLAY="$WIDTH"
+        case "$WIDTH_DISPLAY" in
+            *MHz)
+                WIDTH_DISPLAY="${WIDTH_DISPLAY%MHz}"
+                ;;
+        esac
+
+        # Tx power normally comes back as "19.00 dBm".
+        TX_DISPLAY="$TXPOWER"
+        TX_DISPLAY="${TX_DISPLAY% dBm}"
+
+        # Create a simple SSID number based on the VAP suffix.
+        case "$INT" in
+            *_1) SSID_NAME="SSID1" ;;
+            *_2) SSID_NAME="SSID2" ;;
+            *_3) SSID_NAME="SSID3" ;;
+            *_4) SSID_NAME="SSID4" ;;
+            *) SSID_NAME="SSID" ;;
+        esac
+
+        TOTAL_CLIENTS=$((TOTAL_CLIENTS + CLIENTS))
+        TOTAL_ROWS=$((TOTAL_ROWS + 1))
+
+        printf '  %-7s %-9s %-18s %-8s %-6s %-4s %-7s %-9s %-7s %-35s\n' \
+            "$SSID_NAME" \
+            "$INT" \
+            "$BSSID" \
+            "$CLIENTS" \
+            "$BAND" \
+            "$CHANNEL" \
+            "$WIDTH_DISPLAY" \
+            "$TX_DISPLAY" \
+            "phy$PHY" \
+            "$SSID"
+
+    done < "$SSID_FILE"
+
+    printf '  %-7s %-9s %-18s %-8s %-6s %-4s %-7s %-9s %-7s %-35s\n' \
+        "-------" "---------" "------------------" "--------" \
+        "------" "----" "-------" "---------" "-------" \
+        "-----------------------------------"
+
+    printf '  %-7s %-9s %-18s %-8s %-6s %-4s %-7s %-9s %-7s %-35s\n' \
+        "Total" "---" "---" "$TOTAL_CLIENTS" \
+        "---" "---" "---" "---" "---" "---"
+}
+
+# ================================================================
 # CLIENTS
 # ================================================================
 
@@ -1501,229 +1732,6 @@ report_clients() {
 }
 
 # ================================================================
-# SSID INTERFACES
-#
-# Displays the wireless interface and its associated SSID/ESSID.
-#
-# This allows support to identify:
-#   SSID
-#   Wireless interface
-#   BSSID
-#   Client count
-#   Band
-#   Channel
-#   Channel width
-#   TX power
-#   PHY
-#   Actual ESSID
-#
-# Existing diagnostics are not modified.
-# ================================================================
-
-get_ssid_number() {
-
-    IF="$1"
-
-    case "$IF" in
-        ap1_1|ap2_1)
-            echo "SSID1"
-            ;;
-        ap1_2|ap2_2)
-            echo "SSID2"
-            ;;
-        ap1_3|ap2_3)
-            echo "SSID3"
-            ;;
-        ap1_4|ap2_4)
-            echo "SSID4"
-            ;;
-        *)
-            echo "-"
-            ;;
-    esac
-}
-
-get_bssid() {
-
-    IF="$1"
-
-    get_mac "$IF"
-}
-
-get_band() {
-
-    IF="$1"
-
-    CHANNEL="$(get_channel "$IF")"
-
-    if [ -z "$CHANNEL" ]; then
-        echo "-"
-        return
-    fi
-
-    case "$CHANNEL" in
-        1|2|3|4|5|6|7|8|9|10|11|12|13|14)
-            echo "2.4"
-            ;;
-        *)
-            echo "5"
-            ;;
-    esac
-}
-
-get_txpower_dbm() {
-
-    IF="$1"
-
-    iw dev "$IF" info 2>/dev/null |
-        awk '
-            /txpower/ {
-                print $2
-                exit
-            }
-        '
-}
-
-get_essid() {
-
-    IF="$1"
-
-    iw dev "$IF" info 2>/dev/null |
-        awk '
-            /^[[:space:]]*ssid / {
-                sub(/^[[:space:]]*ssid /,"")
-                print
-                exit
-            }
-        '
-}
-
-get_ssid_width() {
-
-    IF="$1"
-
-    WIDTH="$(get_width "$IF")"
-
-    case "$WIDTH" in
-        ""|N/A)
-            echo "-"
-            ;;
-        *)
-            printf '%s\n' "$WIDTH" |
-                sed 's/[^0-9]*//g'
-            ;;
-    esac
-}
-
-report_ssid_interfaces() {
-
-    section "SSID INTERFACES"
-
-    if ! have iw; then
-        skip "iw is not installed"
-        return
-    fi
-
-    SSID_FILE="${TMP_BASE}_ssid_interfaces"
-
-    get_ap_interfaces > "$SSID_FILE" 2>/dev/null
-
-    if [ ! -s "$SSID_FILE" ]; then
-        skip "No AP-mode wireless interfaces detected"
-        return
-    fi
-
-    printf '  %-6s %-8s %-18s %-8s %-6s %-4s %-6s %-8s %-7s %-36s\n' \
-        "SSID" \
-        "IF" \
-        "BSSID" \
-        "Clients" \
-        "Band" \
-        "Ch" \
-        "Width" \
-        "Tx" \
-        "Phy" \
-        "ESSID"
-
-    printf '  %-6s %-8s %-18s %-8s %-6s %-4s %-6s %-8s %-7s %-36s\n' \
-        "------" \
-        "--------" \
-        "------------------" \
-        "--------" \
-        "------" \
-        "----" \
-        "------" \
-        "--------" \
-        "-------" \
-        "------------------------------------"
-
-    TOTAL_SSID_CLIENTS=0
-
-    while IFS="$(printf '\t')" read -r PHY INT; do
-
-        [ -n "$INT" ] || continue
-
-        SSID="$(get_ssid_number "$INT")"
-        BSSID="$(get_bssid "$INT")"
-        CLIENTS="$(count_clients "$INT")"
-        BAND="$(get_band "$INT")"
-        CHANNEL="$(get_channel "$INT")"
-        WIDTH="$(get_ssid_width "$INT")"
-        TXPOWER="$(get_txpower_dbm "$INT")"
-        ESSID="$(get_essid "$INT")"
-
-        [ -n "$BSSID" ] || BSSID="-"
-        [ -n "$CLIENTS" ] || CLIENTS="0"
-        [ -n "$BAND" ] || BAND="-"
-        [ -n "$CHANNEL" ] || CHANNEL="-"
-        [ -n "$WIDTH" ] || WIDTH="-"
-        [ -n "$TXPOWER" ] || TXPOWER="-"
-        [ -n "$ESSID" ] || ESSID="-"
-
-        TOTAL_SSID_CLIENTS=$((TOTAL_SSID_CLIENTS + CLIENTS))
-
-        printf '  %-6s %-8s %-18s %-8s %-6s %-4s %-6s %-8s %-7s %-36s\n' \
-            "$SSID" \
-            "$INT" \
-            "$BSSID" \
-            "$CLIENTS" \
-            "$BAND" \
-            "$CHANNEL" \
-            "$WIDTH" \
-            "$TXPOWER" \
-            "phy$PHY" \
-            "$ESSID"
-
-    done < "$SSID_FILE"
-
-    printf '  %-6s %-8s %-18s %-8s %-6s %-4s %-6s %-8s %-7s %-36s\n' \
-        "------" \
-        "--------" \
-        "------------------" \
-        "--------" \
-        "------" \
-        "----" \
-        "------" \
-        "--------" \
-        "-------" \
-        "------------------------------------"
-
-    printf '  %-6s %-8s %-18s %-8s %-6s %-4s %-6s %-8s %-7s %-36s\n' \
-        "Total" \
-        "---" \
-        "---" \
-        "$TOTAL_SSID_CLIENTS" \
-        "---" \
-        "---" \
-        "---" \
-        "---" \
-        "---" \
-        "---"
-
-    printf '\n'
-}
-
-# ================================================================
 # MANAGEMENT
 # ================================================================
 
@@ -1800,7 +1808,35 @@ report_dhcp_bridge() {
         )"
 
         if [ -n "$BRIDGES" ]; then
-            ok "Bridges: $BRIDGES"
+
+            # Keep long bridge lists inside the 70-character box.
+            printf '%s\n' "$BRIDGES" |
+            awk '
+                {
+                    line=$0
+
+                    while (length(line) > 62) {
+                        cut=62
+
+                        while (cut > 1 && substr(line,cut,1)!=" ")
+                            cut--
+
+                        if (cut <= 1)
+                            cut=62
+
+                        printf "[ OK ] Bridges: %s\n", substr(line,1,cut-1)
+
+                        line=substr(line,cut+1)
+                    }
+
+                    if (length(line) > 0)
+                        printf "[ OK ] Bridges: %s\n", line
+                }
+            ' |
+            while IFS= read -r LINE; do
+                printf '  %s\n' "$LINE"
+            done
+
         else
             info "No bridge information returned"
         fi
