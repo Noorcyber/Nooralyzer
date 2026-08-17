@@ -1,13 +1,13 @@
 #!/bin/sh
 
 # ================================================================
-# NOORALYZER v1.5
+# NOORALYZER v1.6
 # DNET AP Diagnostic & Troubleshooting Tool
 #
 # Read-only diagnostics for Datto/Kaseya Networking APs
 # ================================================================
 
-VERSION="1.5"
+VERSION="1.6"
 TMP_BASE="/tmp/nooralyzer.$$"
 
 # ================================================================
@@ -75,11 +75,11 @@ section() {
 
 # Wide section used only for tables that genuinely need more room
 section_wide() {
-    printf '\n%s+------------------------------------------------------------------------------------------------------------------------+%s\n' \
+    printf '\n%s+----------------------------------------------------------------------------------------------------------------+%s\n' \
         "$C_CYAN" "$C_RESET"
-    printf '%s| %-118s |%s\n' \
+    printf '%s| %-112s |%s\n' \
         "$C_CYAN" "$1" "$C_RESET"
-    printf '%s+------------------------------------------------------------------------------------------------------------------------+%s\n' \
+    printf '%s+----------------------------------------------------------------------------------------------------------------+%s\n' \
         "$C_CYAN" "$C_RESET"
 }
 
@@ -1464,8 +1464,38 @@ get_ssid() {
 
     IF="$1"
 
-    iw dev "$IF" info 2>/dev/null |
-        awk -F': ' '/ssid / {print $2; exit}'
+    # Support both common iw formats:
+    #   ssid My Network
+    #   ssid: My Network
+    # Keep the complete ESSID, including spaces and apostrophes.
+    ESSID="$(
+        iw dev "$IF" info 2>/dev/null |
+        awk '
+            /^[[:space:]]*ssid[[:space:]]*:/ {
+                sub(/^[[:space:]]*ssid[[:space:]]*:[[:space:]]*/, "")
+                print
+                exit
+            }
+
+            /^[[:space:]]*ssid[[:space:]]+/ {
+                sub(/^[[:space:]]*ssid[[:space:]]+/, "")
+                print
+                exit
+            }
+        '
+    )"
+
+    if [ -n "$ESSID" ]; then
+        printf '%s\n' "$ESSID"
+    else
+        printf 'N/A\n'
+    fi
+}
+
+# Alias used by the newer client-quality tests.
+# It reuses the existing ESSID parser without changing SSID output.
+get_essid() {
+    get_ssid "$1"
 }
 
 get_bssid() {
@@ -1487,13 +1517,13 @@ report_ssid_interfaces() {
 
     section_wide "SSID INTERFACES"
 
-    printf '  %-7s %-9s %-18s %-8s %-6s %-4s %-7s %-9s %-7s %-35s\n' \
+    printf '  %-7s %-8s %-18s %-7s %-5s %-4s %-6s %-8s %-7s %-32s\n' \
         "SSID" "IF" "BSSID" "Clients" "Band" "Ch" "Width" "Tx" "Phy" "ESSID"
 
-    printf '  %-7s %-9s %-18s %-8s %-6s %-4s %-7s %-9s %-7s %-35s\n' \
-        "-------" "---------" "------------------" "--------" \
-        "------" "----" "-------" "---------" "-------" \
-        "-----------------------------------"
+    printf '  %-7s %-8s %-18s %-7s %-5s %-4s %-6s %-8s %-7s %-32s\n' \
+        "-------" "--------" "------------------" "-------" \
+        "-----" "----" "------" "--------" "-------" \
+        "--------------------------------"
 
     if ! have iw; then
         skip "iw is not installed"
@@ -1512,9 +1542,10 @@ report_ssid_interfaces() {
     TOTAL_CLIENTS=0
     TOTAL_ROWS=0
 
-    while IFS="$(printf '\t')" read -r PHY INT; do
+    while IFS="$(printf '	')" read -r PHY INT; do
 
         [ -n "$INT" ] || continue
+        [ -n "$PHY" ] || continue
 
         SSID="$(get_ssid "$INT")"
         BSSID="$(get_bssid "$INT")"
@@ -1553,10 +1584,15 @@ report_ssid_interfaces() {
             *) SSID_NAME="SSID" ;;
         esac
 
+        # Keep the ESSID inside the fixed table width.
+        # This only truncates the display; the value used for
+        # diagnostics remains unchanged.
+        ESSID_DISPLAY="$(printf '%s\n' "$SSID" | awk '{print substr($0,1,32)}')"
+
         TOTAL_CLIENTS=$((TOTAL_CLIENTS + CLIENTS))
         TOTAL_ROWS=$((TOTAL_ROWS + 1))
 
-        printf '  %-7s %-9s %-18s %-8s %-6s %-4s %-7s %-9s %-7s %-35s\n' \
+        printf '  %-7s %-8s %-18s %-7s %-5s %-4s %-6s %-8s %-7s %-32s\n' \
             "$SSID_NAME" \
             "$INT" \
             "$BSSID" \
@@ -1566,16 +1602,16 @@ report_ssid_interfaces() {
             "$WIDTH_DISPLAY" \
             "$TX_DISPLAY" \
             "phy$PHY" \
-            "$SSID"
+            "$ESSID_DISPLAY"
 
     done < "$SSID_FILE"
 
-    printf '  %-7s %-9s %-18s %-8s %-6s %-4s %-7s %-9s %-7s %-35s\n' \
-        "-------" "---------" "------------------" "--------" \
-        "------" "----" "-------" "---------" "-------" \
-        "-----------------------------------"
+    printf '  %-7s %-8s %-18s %-7s %-5s %-4s %-6s %-8s %-7s %-32s\n' \
+        "-------" "--------" "------------------" "-------" \
+        "-----" "----" "------" "--------" "-------" \
+        "--------------------------------"
 
-    printf '  %-7s %-9s %-18s %-8s %-6s %-4s %-7s %-9s %-7s %-35s\n' \
+    printf '  %-7s %-8s %-18s %-7s %-5s %-4s %-6s %-8s %-7s %-32s\n' \
         "Total" "---" "---" "$TOTAL_CLIENTS" \
         "---" "---" "---" "---" "---" "---"
 }
@@ -1865,6 +1901,699 @@ report_dhcp_bridge() {
 }
 
 # ================================================================
+# ETHERNET LINK STABILITY
+#
+# Uses the kernel carrier event counter for physical Ethernet
+# interfaces. This is a counter of carrier changes reported by the
+# interface; it is NOT treated as proof of a bad cable by itself.
+# ================================================================
+
+report_link_stability() {
+
+    section "ETHERNET LINK STABILITY"
+
+    printf '  %-8s %-16s %s\n' "IF" "CARRIER EVENTS" "STATUS"
+    printf '  %-8s %-16s %s\n' "--------" "----------------" "----------"
+
+    FOUND=0
+
+    for D in /sys/class/net/*; do
+        [ -e "$D" ] || continue
+        INT="${D##*/}"
+        is_physical_ethernet "$INT" || continue
+        FOUND=1
+
+        CARRIER="$(stat_value "$INT" carrier)"
+        [ -n "$CARRIER" ] || CARRIER=0
+
+        if [ "$CARRIER" -ge 20 ] 2>/dev/null; then
+            STATUS="HIGH"
+            COLOR="$C_RED"
+        elif [ "$CARRIER" -gt 0 ] 2>/dev/null; then
+            STATUS="REVIEW"
+            COLOR="$C_YELLOW"
+        else
+            STATUS="OK"
+            COLOR="$C_GREEN"
+        fi
+
+        printf '  %-8s %-16s ' "$INT" "$CARRIER"
+        printf '%s%s%s\n' "$COLOR" "$STATUS" "$C_RESET"
+    done
+
+    [ "$FOUND" -eq 1 ] || skip "No physical Ethernet interfaces detected"
+}
+
+# ================================================================
+# POWER / POE TELEMETRY
+#
+# Only reports explicit platform telemetry when it is exposed.
+# No inference is made from link state, speed, or interface state.
+# ================================================================
+
+report_power_poe() {
+
+    section "POWER / POE HEALTH"
+
+    FOUND=0
+
+    # Common sysfs locations used by platforms that expose power data.
+    for D in /sys/class/power_supply/*; do
+        [ -e "$D" ] || continue
+        FOUND=1
+
+        NAME="${D##*/}"
+        TYPE="$(cat "$D/type" 2>/dev/null)"
+        ONLINE="$(cat "$D/online" 2>/dev/null)"
+        STATUS="$(cat "$D/status" 2>/dev/null)"
+
+        [ -n "$TYPE" ] || TYPE="N/A"
+        [ -n "$ONLINE" ] || ONLINE="N/A"
+        [ -n "$STATUS" ] || STATUS="N/A"
+
+        printf '  %-18s Type=%-10s Online=%-5s Status=%s\n' \
+            "$NAME" "$TYPE" "$ONLINE" "$STATUS"
+    done
+
+    # Look only in likely interface/device paths for explicit
+    # PoE/PSE telemetry. Do not recursively scan all of /sys because
+    # unrelated filenames may match the same letter sequence.
+    POE_FOUND=""
+
+    for F in \
+        /sys/class/net/*/device/*poe* \
+        /sys/class/net/*/device/*pse* \
+        /sys/class/poe/* \
+        /sys/class/pse/*
+    do
+        [ -f "$F" ] || continue
+        POE_FOUND="${POE_FOUND}${F}\n"
+    done
+
+    if [ -n "$POE_FOUND" ]; then
+        FOUND=1
+
+        printf '  Explicit PoE/PSE telemetry files detected:\n'
+        printf '%b' "$POE_FOUND" |
+        while IFS= read -r FILE; do
+            [ -n "$FILE" ] || continue
+            VALUE="$(cat "$FILE" 2>/dev/null)"
+            printf '    %-60s %s\n' "${FILE#/sys/}" "$VALUE"
+        done
+    fi
+
+    if [ "$FOUND" -eq 0 ]; then
+        skip "PoE/power telemetry not exposed by this platform"
+    fi
+}
+
+# ================================================================
+# DHCP / LEASE HEALTH
+# ================================================================
+
+report_dhcp_leases() {
+
+    section "DHCP LEASE HEALTH"
+
+    if binary_exists dnsmasq; then
+        if process_running dnsmasq; then
+            ok "dnsmasq is running"
+        else
+            warn "dnsmasq is installed but not running"
+        fi
+    else
+        skip "dnsmasq not installed / not applicable"
+        return
+    fi
+
+    LEASE_FILE=""
+
+    for F in \
+        /tmp/dhcp.leases \
+        /var/dhcp.leases \
+        /var/lib/misc/dnsmasq.leases
+    do
+        if [ -s "$F" ]; then
+            LEASE_FILE="$F"
+            break
+        fi
+    done
+
+    if [ -n "$LEASE_FILE" ]; then
+        LEASE_COUNT="$(wc -l < "$LEASE_FILE" 2>/dev/null | tr -d ' ')"
+        [ -n "$LEASE_COUNT" ] || LEASE_COUNT=0
+        ok "Lease database: $LEASE_FILE"
+        printf '  %-25s %s\n' "Active lease records" "$LEASE_COUNT"
+    else
+        info "No DHCP lease database exposed"
+    fi
+
+    if [ -r /etc/config/dhcp ]; then
+        ok "DHCP configuration present"
+    elif [ -r /etc/dnsmasq.conf ]; then
+        ok "dnsmasq configuration present"
+    else
+        info "DHCP configuration file not exposed"
+    fi
+}
+
+# ================================================================
+# DNS LATENCY
+#
+# Uses the shell's time facility around nslookup when available.
+# If timing cannot be parsed reliably, the test remains N/A rather
+# than reporting a fabricated latency.
+# ================================================================
+
+get_dns_latency_ms() {
+
+    if ! have nslookup; then
+        return 1
+    fi
+
+    DNS_TIME_FILE="${TMP_BASE}_dns_time"
+
+    {
+        time nslookup cloudflare.com >/dev/null 2>&1
+    } 2>"$DNS_TIME_FILE"
+
+    RAW="$(cat "$DNS_TIME_FILE" 2>/dev/null)"
+
+    # Common ash format: real 0m0.012s
+    VALUE="$(printf '%s\n' "$RAW" |
+        awk '
+            /real/ {
+                v=$NF
+                gsub(/s/,"",v)
+                split(v,A,"m")
+                if(A[1] != "")
+                    printf "%.0f\n", (A[1]*60 + A[2])*1000
+                exit
+            }
+        ')"
+
+    if [ -n "$VALUE" ]; then
+        printf '%s\n' "$VALUE"
+        return 0
+    fi
+
+    return 1
+}
+
+report_dns_latency() {
+
+    section "DNS LATENCY"
+
+    if ! have nslookup; then
+        skip "nslookup is not installed"
+        return
+    fi
+
+    if ! get_dns_latency_ms > "${TMP_BASE}_dns_latency" 2>/dev/null; then
+        skip "DNS latency timing not supported by this platform"
+        return
+    fi
+
+    LATENCY="$(cat "${TMP_BASE}_dns_latency" 2>/dev/null)"
+
+    if [ -z "$LATENCY" ]; then
+        skip "DNS latency could not be measured"
+        return
+    fi
+
+    printf '  %-25s %s ms\n' "cloudflare.com lookup" "$LATENCY"
+
+    if [ "$LATENCY" -ge 500 ] 2>/dev/null; then
+        warn "DNS lookup latency is HIGH (${LATENCY} ms)"
+    elif [ "$LATENCY" -ge 150 ] 2>/dev/null; then
+        warn "DNS lookup latency is elevated (${LATENCY} ms)"
+    else
+        ok "DNS lookup latency is within expected range"
+    fi
+}
+
+# ================================================================
+# INTERNET QUALITY
+# ================================================================
+
+report_internet_quality() {
+
+    section "INTERNET QUALITY"
+
+    if ! have ping; then
+        skip "ping not installed"
+        return
+    fi
+
+    printf '  %-14s %-10s %-10s %s\n' \
+        "TARGET" "LOSS" "LATENCY" "STATUS"
+    printf '  %-14s %-10s %-10s %s\n' \
+        "--------------" "----------" "----------" "----------"
+
+    for TARGET in 1.1.1.1 8.8.8.8; do
+
+        RESULT="$(ping_test "$TARGET" 3)"
+
+        if [ $? -eq 0 ]; then
+            LOSS="${RESULT%%|*}"
+            LATENCY="${RESULT#*|}"
+
+            if [ "$LOSS" = "0" ] || [ "$LOSS" = "0.0" ]; then
+                STATUS="OK"
+                COLOR="$C_GREEN"
+            elif [ "$LOSS" = "N/A" ]; then
+                STATUS="UNKNOWN"
+                COLOR="$C_DIM"
+            else
+                STATUS="WARN"
+                COLOR="$C_YELLOW"
+            fi
+        else
+            LOSS="N/A"
+            LATENCY="N/A"
+            STATUS="FAILED"
+            COLOR="$C_YELLOW"
+        fi
+
+        printf '  %-14s %-10s %-10s ' \
+            "$TARGET" "${LOSS}%" "${LATENCY} ms"
+        printf '%s%s%s\n' "$COLOR" "$STATUS" "$C_RESET"
+    done
+}
+
+# ================================================================
+# MTU / PATH HEALTH
+#
+# Only runs if BusyBox ping exposes the DF/MTU option (-M).
+# ================================================================
+
+report_mtu() {
+
+    section "MTU / PATH HEALTH"
+
+    GATEWAY="$(get_default_gateway)"
+
+    if [ -z "$GATEWAY" ]; then
+        skip "No default gateway available for MTU testing"
+        return
+    fi
+
+    if ! have ping; then
+        skip "ping not installed"
+        return
+    fi
+
+    if ! ping -c 1 -W 2 "$GATEWAY" >/dev/null 2>&1; then
+        skip "Default gateway is not ICMP reachable; MTU test skipped"
+        return
+    fi
+
+    if ! ping -h 2>&1 | grep -q -- '-M'; then
+        skip "Ping MTU/DF testing not supported by this platform"
+        return
+    fi
+
+    printf '  %-10s %-10s %s\n' "PAYLOAD" "TOTAL MTU" "STATUS"
+    printf '  %-10s %-10s %s\n' "----------" "----------" "----------"
+
+    for SIZE in 1472 1400; do
+        TOTAL_MTU=$((SIZE + 28))
+
+        if ping -M do -s "$SIZE" -c 1 -W 2 "$GATEWAY" >/dev/null 2>&1; then
+            ok "${SIZE} byte payload (${TOTAL_MTU} byte packet) - OK"
+        else
+            warn "${SIZE} byte payload (${TOTAL_MTU} byte packet) - FAILED"
+        fi
+    done
+}
+
+# ================================================================
+# WI-FI CLIENT QUALITY
+#
+# Correlates the existing SSID/interface information with client
+# station statistics. RSSI is the primary signal indicator.
+# Retry counts are supporting information and are not treated as
+# a normalized retry percentage.
+# ================================================================
+
+get_client_quality() {
+
+    IF="$1"
+
+    iw "$IF" station dump 2>/dev/null |
+        awk '
+            function emit() {
+                if (MAC == "")
+                    return
+
+                RSSI_NUM="N/A"
+                if (SIGNAL ~ /^-?[0-9]+/) {
+                    RSSI_NUM=SIGNAL
+                    gsub(/[^-0-9].*/,"",RSSI_NUM)
+                }
+
+                if (RSSI_NUM != "N/A" && RSSI_NUM < -70)
+                    WEAK=1
+                else
+                    WEAK=0
+
+                if (RSSI_NUM != "N/A" && RSSI_NUM < -80)
+                    HEALTH="HIGH"
+                else if (RSSI_NUM != "N/A" && RSSI_NUM < -70)
+                    HEALTH="WARN"
+                else
+                    HEALTH="OK"
+
+                print MAC "|" RSSI_NUM "|" TX "|" RETRIES "|" HEALTH
+            }
+
+            /^Station / {
+                emit()
+                MAC=$2
+                SIGNAL="N/A"
+                TX="N/A"
+                RETRIES="N/A"
+                next
+            }
+
+            /^[[:space:]]*signal:/ {
+                SIGNAL=$2
+                next
+            }
+
+            /^[[:space:]]*tx bitrate:/ {
+                TX=$3" "$4
+                next
+            }
+
+            /^[[:space:]]*tx retries:/ {
+                RETRIES=$3
+                next
+            }
+
+            END {
+                emit()
+            }
+        '
+}
+
+report_client_quality() {
+
+    section_wide "WI-FI CLIENT QUALITY"
+
+    printf '  %-7s %-9s %-8s %-12s %-12s %-10s %s\n' \
+        "SSID" "IF" "CLIENTS" "AVG RSSI" "WEAK" "RETRIES" "HEALTH"
+
+    printf '  %-7s %-9s %-8s %-12s %-12s %-10s %s\n' \
+        "-------" "---------" "--------" "------------" "------------" "----------" "----------"
+
+    QUALITY_FILE="${TMP_BASE}_quality"
+    get_ap_interfaces > "$QUALITY_FILE" 2>/dev/null
+
+    if [ ! -s "$QUALITY_FILE" ]; then
+        skip "No AP-mode wireless interfaces detected"
+        return
+    fi
+
+    while IFS="$(printf '\t')" read -r PHY INT; do
+
+        [ -n "$INT" ] || continue
+
+        ESSID="$(get_essid "$INT")"
+        COUNT="$(count_clients "$INT")"
+        [ -n "$COUNT" ] || COUNT=0
+
+        if [ "$COUNT" -eq 0 ] 2>/dev/null; then
+            printf '  %-7s %-9s %-8s %-12s %-12s %-10s %s\n' \
+                "$ESSID" "$INT" "0" "N/A" "0" "0" "OK"
+            continue
+        fi
+
+        DATA="$(get_client_quality "$INT")"
+
+        SUM=0
+        SIGNAL_COUNT=0
+        WEAK=0
+        HIGH_RETRY=0
+        RETRY_SUM=0
+
+        OLDIFS="$IFS"
+        IFS=''
+        while read -r LINE; do
+            [ -n "$LINE" ] || continue
+
+            OLDIFS2="$IFS"
+            IFS='|'
+            set -- $LINE
+            IFS="$OLDIFS2"
+
+            RSSI="$2"
+            RETRIES="$4"
+            HEALTH="$5"
+
+            if [ "$RSSI" != "N/A" ] && [ -n "$RSSI" ]; then
+                SUM=$((SUM + RSSI))
+                SIGNAL_COUNT=$((SIGNAL_COUNT + 1))
+
+                if [ "$RSSI" -lt -70 ] 2>/dev/null; then
+                    WEAK=$((WEAK + 1))
+                fi
+            fi
+
+            if [ "$RETRIES" -ge 20 ] 2>/dev/null; then
+                HIGH_RETRY=$((HIGH_RETRY + 1))
+            fi
+
+            if [ "$RETRIES" != "N/A" ] && [ -n "$RETRIES" ]; then
+                RETRY_SUM=$((RETRY_SUM + RETRIES))
+            fi
+        done <<EOF
+$DATA
+EOF
+        IFS="$OLDIFS"
+
+        if [ "$SIGNAL_COUNT" -gt 0 ]; then
+            AVG="$(awk -v s="$SUM" -v c="$SIGNAL_COUNT" 'BEGIN {printf "%.0f",s/c}')"
+        else
+            AVG="N/A"
+        fi
+
+        HEALTH="OK"
+        COLOR="$C_GREEN"
+
+        if [ "$WEAK" -gt 0 ] || [ "$HIGH_RETRY" -gt 0 ]; then
+            HEALTH="WARN"
+            COLOR="$C_YELLOW"
+        fi
+
+        if [ "$AVG" != "N/A" ] && [ "$AVG" -lt -75 ] 2>/dev/null; then
+            HEALTH="HIGH"
+            COLOR="$C_RED"
+        fi
+
+        printf '  %-7s %-9s %-8s %-12s %-12s %-10s ' \
+            "$ESSID" "$INT" "$COUNT" "$AVG dBm" "$WEAK" "$RETRY_SUM"
+        printf '%s%s%s\n' "$COLOR" "$HEALTH" "$C_RESET"
+
+    done < "$QUALITY_FILE"
+}
+
+# ================================================================
+# PER-CLIENT HEALTH
+# ================================================================
+
+report_per_client_health() {
+
+    section_wide "PER-CLIENT HEALTH"
+
+    printf '  %-9s %-17s %-8s %-16s %-10s %s\n' \
+        "IF" "CLIENT MAC" "RSSI" "TX RATE" "RETRIES" "HEALTH"
+
+    printf '  %-9s %-17s %-8s %-16s %-10s %s\n' \
+        "---------" "-----------------" "--------" "----------------" "----------" "----------"
+
+    CLIENT_HEALTH_FILE="${TMP_BASE}_client_health"
+    get_ap_interfaces > "$CLIENT_HEALTH_FILE" 2>/dev/null
+
+    if [ ! -s "$CLIENT_HEALTH_FILE" ]; then
+        skip "No AP-mode wireless interfaces detected"
+        return
+    fi
+
+    while IFS="$(printf '\t')" read -r PHY INT; do
+
+        DATA="$(
+            iw "$INT" station dump 2>/dev/null |
+            awk '
+                function emit() {
+                    if (MAC != "")
+                        print MAC "|" SIGNAL "|" TX "|" RETRIES
+                }
+
+                /^Station / {
+                    emit()
+                    MAC=$2
+                    SIGNAL="N/A"
+                    TX="N/A"
+                    RETRIES="N/A"
+                    next
+                }
+
+                /^[[:space:]]*signal:/ { SIGNAL=$2; next }
+                /^[[:space:]]*tx bitrate:/ { TX=$3" "$4; next }
+                /^[[:space:]]*tx retries:/ { RETRIES=$3; next }
+
+                END { emit() }
+            '
+        )"
+
+        while IFS='|' read -r MAC RSSI TX RETRIES; do
+
+            [ -n "$MAC" ] || continue
+
+            HEALTH="OK"
+            COLOR="$C_GREEN"
+
+            RSSI_NUM="$(printf '%s\n' "$RSSI" | sed 's/[^-0-9].*//')"
+
+            if [ -n "$RSSI_NUM" ] && [ "$RSSI_NUM" -lt -80 ] 2>/dev/null; then
+                HEALTH="HIGH"
+                COLOR="$C_RED"
+            elif [ -n "$RSSI_NUM" ] && [ "$RSSI_NUM" -lt -70 ] 2>/dev/null; then
+                HEALTH="WARN"
+                COLOR="$C_YELLOW"
+            fi
+
+            if [ "$RETRIES" -ge 20 ] 2>/dev/null && [ "$HEALTH" = "OK" ]; then
+                HEALTH="WARN"
+                COLOR="$C_YELLOW"
+            fi
+
+            printf '  %-9s %-17s %-8s %-16s %-10s ' \
+                "$INT" "$MAC" "$RSSI" "$TX" "$RETRIES"
+            printf '%s%s%s\n' "$COLOR" "$HEALTH" "$C_RESET"
+
+        done <<EOF
+$DATA
+EOF
+
+    done < "$CLIENT_HEALTH_FILE"
+}
+
+# ================================================================
+# TIME / NTP HEALTH
+#
+# Reports configuration and service evidence only. It does not
+# change system time or force synchronization.
+# ================================================================
+
+report_time_ntp() {
+
+    section "TIME / NTP HEALTH"
+
+    printf '  %-25s %s\n' "System UTC time" "$(date -u '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null)"
+
+    NTP_CONFIG=""
+
+    if [ -r /etc/config/system ]; then
+        NTP_CONFIG="$(grep -E '^[[:space:]]*list[[:space:]]+server' /etc/config/system 2>/dev/null)"
+    fi
+
+    if [ -z "$NTP_CONFIG" ] && [ -r /etc/ntp.conf ]; then
+        NTP_CONFIG="$(grep -E '^[[:space:]]*server[[:space:]]+' /etc/ntp.conf 2>/dev/null)"
+    fi
+
+    if [ -n "$NTP_CONFIG" ]; then
+        ok "NTP server configuration present"
+    else
+        info "NTP server configuration not exposed"
+    fi
+
+    if process_running ntpd; then
+        ok "ntpd is running"
+    elif process_running chronyd; then
+        ok "chronyd is running"
+    elif process_running systemd-timesyncd; then
+        ok "systemd-timesyncd is running"
+    else
+        info "NTP synchronization process not detected"
+    fi
+}
+
+# ================================================================
+# REBOOT / CRASH EVIDENCE
+# ================================================================
+
+report_reboot_crash() {
+
+    section "REBOOT / CRASH EVIDENCE"
+
+    WATCHDOG="$(count_log 'watchdog|watchdog.*reset')"
+    PANIC="$(count_log 'kernel panic|panic:|Oops:|call trace')"
+    REBOOT="$(count_log 'reboot|system reboot|Restarting system')"
+    OOM="$(count_log 'out of memory|oom-killer|killed process')"
+
+    printf '  %-25s %-8s %s\n' "TEST" "COUNT" "STATUS"
+    printf '  %-25s %-8s %s\n' "-------------------------" "--------" "----------"
+
+    if [ "$WATCHDOG" -gt 0 ] 2>/dev/null; then
+        printf '  %-25s %-8s %s%s%s\n' "Watchdog/reset events" "$WATCHDOG" "$C_YELLOW" "WARN" "$C_RESET"
+    else
+        printf '  %-25s %-8s %sOK%s\n' "Watchdog/reset events" "0" "$C_GREEN" "$C_RESET"
+    fi
+
+    if [ "$PANIC" -gt 0 ] 2>/dev/null; then
+        printf '  %-25s %-8s %s%s%s\n' "Kernel panic evidence" "$PANIC" "$C_RED" "FAIL" "$C_RESET"
+        issue "$PANIC kernel panic/Oops event(s) found"
+    else
+        printf '  %-25s %-8s %sOK%s\n' "Kernel panic evidence" "0" "$C_GREEN" "$C_RESET"
+    fi
+
+    printf '  %-25s %-8s %s\n' "Reboot-related events" "$REBOOT" "INFO"
+
+    if [ "$OOM" -gt 0 ] 2>/dev/null; then
+        printf '  %-25s %-8s %s%s%s\n' "OOM evidence" "$OOM" "$C_RED" "FAIL" "$C_RESET"
+    else
+        printf '  %-25s %-8s %sOK%s\n' "OOM evidence" "0" "$C_GREEN" "$C_RESET"
+    fi
+
+    info "Crash/reboot counts are log evidence and do not establish the reboot cause by themselves."
+}
+
+# ================================================================
+# PROCESS RESOURCE HEALTH
+#
+# Only displays CPU/MEM columns when the platform's ps exposes
+# those fields. Otherwise it safely reports capability unavailable.
+# ================================================================
+
+report_process_resources() {
+
+    section "PROCESS RESOURCE HEALTH"
+
+    if ! have ps; then
+        skip "ps is not installed"
+        return
+    fi
+
+    PS_HEADER="$(ps w 2>/dev/null | head -n 1)"
+
+    if ! printf '%s\n' "$PS_HEADER" | grep -Eq 'CPU|%CPU|MEM|%MEM'; then
+        skip "Process CPU/memory columns not exposed by this platform"
+        return
+    fi
+
+    printf '  %-22s %s\n' "PROCESS RESOURCE DATA" "$PS_HEADER"
+
+    for P in hostapd dnsmasq udshape udsplash juggler; do
+        LINE="$(ps w 2>/dev/null | grep " $P" | grep -v grep | head -n 1)"
+        if [ -n "$LINE" ]; then
+            printf '  %s\n' "$LINE"
+        fi
+    done
+}
+
+# ================================================================
 # FINAL VERDICT
 # ================================================================
 
@@ -1961,17 +2690,28 @@ printf '  Mode               : Diagnose . Detect . Troubleshoot\n'
 report_system
 report_wired
 report_ethernet_errors
+report_link_stability
+report_power_poe
 report_ip
 report_connectivity
+report_internet_quality
+report_dns_latency
+report_mtu
 report_network_state
 report_management
 report_dhcp_bridge
+report_dhcp_leases
 report_processes
+report_process_resources
 report_logs
+report_reboot_crash
+report_time_ntp
 report_radios
 radio_busy_time
 report_ssid_interfaces
 report_clients
+report_client_quality
+report_per_client_health
 report_summary
 
 # ================================================================
