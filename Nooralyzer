@@ -75,11 +75,11 @@ section() {
 
 # Wide section used only for tables that genuinely need more room
 section_wide() {
-    printf '\n%s+------------------------------------------------------------------------------------------------------------------------+%s\n' \
+    printf '\n%s+----------------------------------------------------------------------------------------------------------------+%s\n' \
         "$C_CYAN" "$C_RESET"
-    printf '%s| %-118s |%s\n' \
+    printf '%s| %-112s |%s\n' \
         "$C_CYAN" "$1" "$C_RESET"
-    printf '%s+------------------------------------------------------------------------------------------------------------------------+%s\n' \
+    printf '%s+----------------------------------------------------------------------------------------------------------------+%s\n' \
         "$C_CYAN" "$C_RESET"
 }
 
@@ -1464,8 +1464,32 @@ get_ssid() {
 
     IF="$1"
 
-    iw dev "$IF" info 2>/dev/null |
-        awk -F': ' '/ssid / {print $2; exit}'
+    # Support both common iw formats:
+    #   ssid My Network
+    #   ssid: My Network
+    # Keep the complete ESSID, including spaces and apostrophes.
+    ESSID="$(
+        iw dev "$IF" info 2>/dev/null |
+        awk '
+            /^[[:space:]]*ssid[[:space:]]*:/ {
+                sub(/^[[:space:]]*ssid[[:space:]]*:[[:space:]]*/, "")
+                print
+                exit
+            }
+
+            /^[[:space:]]*ssid[[:space:]]+/ {
+                sub(/^[[:space:]]*ssid[[:space:]]+/, "")
+                print
+                exit
+            }
+        '
+    )"
+
+    if [ -n "$ESSID" ]; then
+        printf '%s\n' "$ESSID"
+    else
+        printf 'N/A\n'
+    fi
 }
 
 get_bssid() {
@@ -1487,13 +1511,13 @@ report_ssid_interfaces() {
 
     section_wide "SSID INTERFACES"
 
-    printf '  %-7s %-9s %-18s %-8s %-6s %-4s %-7s %-9s %-7s %-35s\n' \
+    printf '  %-7s %-8s %-18s %-7s %-5s %-4s %-6s %-8s %-7s %-32s\n' \
         "SSID" "IF" "BSSID" "Clients" "Band" "Ch" "Width" "Tx" "Phy" "ESSID"
 
-    printf '  %-7s %-9s %-18s %-8s %-6s %-4s %-7s %-9s %-7s %-35s\n' \
-        "-------" "---------" "------------------" "--------" \
-        "------" "----" "-------" "---------" "-------" \
-        "-----------------------------------"
+    printf '  %-7s %-8s %-18s %-7s %-5s %-4s %-6s %-8s %-7s %-32s\n' \
+        "-------" "--------" "------------------" "-------" \
+        "-----" "----" "------" "--------" "-------" \
+        "--------------------------------"
 
     if ! have iw; then
         skip "iw is not installed"
@@ -1512,9 +1536,10 @@ report_ssid_interfaces() {
     TOTAL_CLIENTS=0
     TOTAL_ROWS=0
 
-    while IFS="$(printf '\t')" read -r PHY INT; do
+    while IFS="$(printf '	')" read -r PHY INT; do
 
         [ -n "$INT" ] || continue
+        [ -n "$PHY" ] || continue
 
         SSID="$(get_ssid "$INT")"
         BSSID="$(get_bssid "$INT")"
@@ -1553,10 +1578,15 @@ report_ssid_interfaces() {
             *) SSID_NAME="SSID" ;;
         esac
 
+        # Keep the ESSID inside the fixed table width.
+        # This only truncates the display; the value used for
+        # diagnostics remains unchanged.
+        ESSID_DISPLAY="$(printf '%s\n' "$SSID" | awk '{print substr($0,1,32)}')"
+
         TOTAL_CLIENTS=$((TOTAL_CLIENTS + CLIENTS))
         TOTAL_ROWS=$((TOTAL_ROWS + 1))
 
-        printf '  %-7s %-9s %-18s %-8s %-6s %-4s %-7s %-9s %-7s %-35s\n' \
+        printf '  %-7s %-8s %-18s %-7s %-5s %-4s %-6s %-8s %-7s %-32s\n' \
             "$SSID_NAME" \
             "$INT" \
             "$BSSID" \
@@ -1566,16 +1596,16 @@ report_ssid_interfaces() {
             "$WIDTH_DISPLAY" \
             "$TX_DISPLAY" \
             "phy$PHY" \
-            "$SSID"
+            "$ESSID_DISPLAY"
 
     done < "$SSID_FILE"
 
-    printf '  %-7s %-9s %-18s %-8s %-6s %-4s %-7s %-9s %-7s %-35s\n' \
-        "-------" "---------" "------------------" "--------" \
-        "------" "----" "-------" "---------" "-------" \
-        "-----------------------------------"
+    printf '  %-7s %-8s %-18s %-7s %-5s %-4s %-6s %-8s %-7s %-32s\n' \
+        "-------" "--------" "------------------" "-------" \
+        "-----" "----" "------" "--------" "-------" \
+        "--------------------------------"
 
-    printf '  %-7s %-9s %-18s %-8s %-6s %-4s %-7s %-9s %-7s %-35s\n' \
+    printf '  %-7s %-8s %-18s %-7s %-5s %-4s %-6s %-8s %-7s %-32s\n' \
         "Total" "---" "---" "$TOTAL_CLIENTS" \
         "---" "---" "---" "---" "---" "---"
 }
