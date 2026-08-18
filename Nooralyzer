@@ -7,7 +7,7 @@
 # Read-only diagnostics for Datto/Kaseya Networking APs
 # ================================================================
 
-VERSION="1.6"
+VERSION="1.7"
 TMP_BASE="/tmp/nooralyzer.$$"
 
 # ================================================================
@@ -2072,32 +2072,41 @@ get_dns_latency_ms() {
     fi
 
     DNS_TIME_FILE="${TMP_BASE}_dns_time"
+    DNS_QUERY_COUNT=10
+    DNS_SUCCESS=0
 
-    {
-        time nslookup cloudflare.com >/dev/null 2>&1
-    } 2>"$DNS_TIME_FILE"
+    START_MS="$(awk '{printf "%.0f",$1*1000}' /proc/uptime 2>/dev/null)"
+    [ -n "$START_MS" ] || return 1
 
-    RAW="$(cat "$DNS_TIME_FILE" 2>/dev/null)"
+    i=1
+    while [ "$i" -le "$DNS_QUERY_COUNT" ]; do
+        if nslookup cloudflare.com >/dev/null 2>&1; then
+            DNS_SUCCESS=$((DNS_SUCCESS + 1))
+        fi
+        i=$((i + 1))
+    done
 
-    # Common ash format: real 0m0.012s
-    VALUE="$(printf '%s\n' "$RAW" |
-        awk '
-            /real/ {
-                v=$NF
-                gsub(/s/,"",v)
-                split(v,A,"m")
-                if(A[1] != "")
-                    printf "%.0f\n", (A[1]*60 + A[2])*1000
-                exit
-            }
-        ')"
+    END_MS="$(awk '{printf "%.0f",$1*1000}' /proc/uptime 2>/dev/null)"
+    [ -n "$END_MS" ] || return 1
 
-    if [ -n "$VALUE" ]; then
-        printf '%s\n' "$VALUE"
-        return 0
+    ELAPSED=$((END_MS - START_MS))
+
+    if [ "$DNS_SUCCESS" -eq 0 ] 2>/dev/null; then
+        return 1
     fi
 
-    return 1
+    # /proc/uptime has centisecond precision on Linux. A very fast
+    # lookup batch can therefore measure as 0ms. Keep the result
+    # honest rather than inventing sub-centisecond precision.
+    if [ "$ELAPSED" -lt 1 ]; then
+        ELAPSED=1
+    fi
+
+    AVG_MS=$((ELAPSED / DNS_QUERY_COUNT))
+    [ "$AVG_MS" -gt 0 ] || AVG_MS=1
+
+    printf '%s|%s|%s\n' "$DNS_QUERY_COUNT" "$DNS_SUCCESS" "$AVG_MS"
+    return 0
 }
 
 report_dns_latency() {
@@ -2109,24 +2118,29 @@ report_dns_latency() {
         return
     fi
 
-    if ! get_dns_latency_ms > "${TMP_BASE}_dns_latency" 2>/dev/null; then
-        skip "DNS latency timing not supported by this platform"
-        return
-    fi
+    RESULT="$(get_dns_latency_ms)"
 
-    LATENCY="$(cat "${TMP_BASE}_dns_latency" 2>/dev/null)"
-
-    if [ -z "$LATENCY" ]; then
+    if [ -z "$RESULT" ]; then
         skip "DNS latency could not be measured"
         return
     fi
 
-    printf '  %-25s %s ms\n' "cloudflare.com lookup" "$LATENCY"
+    QUERIES="${RESULT%%|*}"
+    REST="${RESULT#*|}"
+    SUCCESS="${REST%%|*}"
+    LATENCY="${REST#*|}"
+
+    printf '  %-25s %s\n' "Resolver" "$(awk '/^[[:space:]]*nameserver[[:space:]]+/ {print $2; exit}' /etc/resolv.conf 2>/dev/null)"
+    printf '  %-25s %s\n' "Queries" "$QUERIES"
+    printf '  %-25s %s/%s\n' "Successful" "$SUCCESS" "$QUERIES"
+    printf '  %-25s %s ms\n' "Average lookup time" "$LATENCY"
 
     if [ "$LATENCY" -ge 500 ] 2>/dev/null; then
-        warn "DNS lookup latency is HIGH (${LATENCY} ms)"
+        warn "DNS lookup latency is HIGH (${LATENCY} ms average)"
     elif [ "$LATENCY" -ge 150 ] 2>/dev/null; then
-        warn "DNS lookup latency is elevated (${LATENCY} ms)"
+        warn "DNS lookup latency is elevated (${LATENCY} ms average)"
+    elif [ "$SUCCESS" -lt "$QUERIES" ] 2>/dev/null; then
+        warn "Some DNS queries failed (${SUCCESS}/${QUERIES} successful)"
     else
         ok "DNS lookup latency is within expected range"
     fi
@@ -2189,12 +2203,16 @@ report_internet_quality() {
 
 report_mtu() {
 
-    section "MTU / PATH HEALTH"
+    section "PATH PACKET SIZE"
 
     GATEWAY="$(get_default_gateway)"
 
+    if [ -z "$GATEWAY" ] && have ip; then
+        GATEWAY="$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="via") {print $(i+1); exit}}')"
+    fi
+
     if [ -z "$GATEWAY" ]; then
-        skip "No default gateway available for MTU testing"
+        skip "No reachable path gateway exposed"
         return
     fi
 
@@ -2204,28 +2222,44 @@ report_mtu() {
     fi
 
     if ! ping -c 1 -W 2 "$GATEWAY" >/dev/null 2>&1; then
-        skip "Default gateway is not ICMP reachable; MTU test skipped"
+        skip "Gateway is not ICMP reachable; packet-size test skipped"
         return
     fi
 
-    if ! ping -h 2>&1 | grep -q -- '-M'; then
-        skip "Ping MTU/DF testing not supported by this platform"
-        return
+    PATH_DEV=""
+    PATH_SRC=""
+
+    if have ip; then
+        ROUTE_INFO="$(ip route get 1.1.1.1 2>/dev/null)"
+        PATH_DEV="$(printf '%s\n' "$ROUTE_INFO" | awk '{for(i=1;i<=NF;i++) if($i=="dev") {print $(i+1); exit}}')"
+        PATH_SRC="$(printf '%s\n' "$ROUTE_INFO" | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}')"
     fi
 
-    printf '  %-10s %-10s %s\n' "PAYLOAD" "TOTAL MTU" "STATUS"
-    printf '  %-10s %-10s %s\n' "----------" "----------" "----------"
+    printf '  %-25s %s\n' "Gateway" "$GATEWAY"
+    [ -n "$PATH_DEV" ] && printf '  %-25s %s\n' "Interface" "$PATH_DEV"
+    [ -n "$PATH_SRC" ] && printf '  %-25s %s\n' "Source IP" "$PATH_SRC"
 
-    for SIZE in 1472 1400; do
-        TOTAL_MTU=$((SIZE + 28))
+    printf '  %-12s %-12s %s\n' "PAYLOAD" "PACKET" "STATUS"
+    printf '  %-12s %-12s %s\n' "------------" "------------" "----------"
 
-        if ping -M do -s "$SIZE" -c 1 -W 2 "$GATEWAY" >/dev/null 2>&1; then
-            ok "${SIZE} byte payload (${TOTAL_MTU} byte packet) - OK"
+    # BusyBox ping on the target AP does not support -M do, so this is
+    # intentionally a packet-size reachability test rather than a DF/MTU
+    # discovery claim. IPv4/ICMP overhead is 28 bytes.
+    for SIZE in 1400 1450 1472; do
+        TOTAL_SIZE=$((SIZE + 28))
+
+        if ping -c 1 -W 2 -s "$SIZE" "$GATEWAY" >/dev/null 2>&1; then
+            printf '  %-12s %-12s %sOK%s\n' \
+                "$SIZE" "$TOTAL_SIZE" "$C_GREEN" "$C_RESET"
         else
-            warn "${SIZE} byte payload (${TOTAL_MTU} byte packet) - FAILED"
+            printf '  %-12s %-12s %sWARN%s\n' \
+                "$SIZE" "$TOTAL_SIZE" "$C_YELLOW" "$C_RESET"
         fi
     done
+
+    info "Packet-size testing does not prove end-to-end path MTU because this platform's ping does not support DF (-M do)."
 }
+
 
 # ================================================================
 # WI-FI CLIENT QUALITY
@@ -2521,6 +2555,107 @@ report_time_ntp() {
 }
 
 # ================================================================
+# HARDWARE TELEMETRY
+#
+# Uses hwmon data exposed by the AP. INA219 units follow the Linux
+# hwmon ABI: voltage is mV, current mA, power uW, shunt mV.
+# Radio temperatures are reported by the ath10k/ath11k hwmon drivers.
+# ================================================================
+
+report_hardware_telemetry() {
+
+    section "HARDWARE TELEMETRY"
+
+    FOUND=0
+
+    # INA219 power monitor(s)
+    for H in /sys/class/hwmon/hwmon*; do
+        [ -d "$H" ] || continue
+        NAME="$(cat "$H/name" 2>/dev/null)"
+
+        case "$NAME" in
+            ina219|ina220|ina226|ina228)
+                FOUND=1
+
+                BUS_MV="$(cat "$H/in1_input" 2>/dev/null)"
+                CURRENT_MA="$(cat "$H/curr1_input" 2>/dev/null)"
+                POWER_UW="$(cat "$H/power1_input" 2>/dev/null)"
+                SHUNT_MV="$(cat "$H/in0_input" 2>/dev/null)"
+
+                if [ -n "$BUS_MV" ]; then
+                    BUS_V="$(awk -v v="$BUS_MV" 'BEGIN {printf "%.3f",v/1000}')"
+                    printf '  %-25s %s V\n' "Bus voltage" "$BUS_V"
+                else
+                    printf '  %-25s N/A\n' "Bus voltage"
+                fi
+
+                if [ -n "$CURRENT_MA" ]; then
+                    CURRENT_A="$(awk -v v="$CURRENT_MA" 'BEGIN {printf "%.3f",v/1000}')"
+                    printf '  %-25s %s A\n' "Current" "$CURRENT_A"
+                else
+                    printf '  %-25s N/A\n' "Current"
+                fi
+
+                if [ -n "$POWER_UW" ]; then
+                    POWER_W="$(awk -v v="$POWER_UW" 'BEGIN {printf "%.3f",v/1000000}')"
+                    printf '  %-25s %s W\n' "Power" "$POWER_W"
+                else
+                    printf '  %-25s N/A\n' "Power"
+                fi
+
+                if [ -n "$SHUNT_MV" ]; then
+                    printf '  %-25s %s mV\n' "Shunt voltage" "$SHUNT_MV"
+                fi
+
+                printf '  %-25s %s\n' "Power monitor" "$NAME"
+                ;;
+        esac
+    done
+
+    # Radio temperature telemetry
+    for H in /sys/class/hwmon/hwmon*; do
+        [ -d "$H" ] || continue
+        NAME="$(cat "$H/name" 2>/dev/null)"
+
+        case "$NAME" in
+            ath10k_hwmon|ath11k_hwmon)
+                FOUND=1
+                TEMP_RAW="$(cat "$H/temp1_input" 2>/dev/null)"
+
+                case "$TEMP_RAW" in
+                    ''|*[!0-9]*)
+                        continue
+                        ;;
+                esac
+
+                TEMP_C="$(awk -v v="$TEMP_RAW" 'BEGIN {printf "%.0f",v/1000}')"
+                STATUS="OK"
+                COLOR="$C_GREEN"
+
+                if [ "$TEMP_C" -ge 85 ] 2>/dev/null; then
+                    STATUS="HIGH"
+                    COLOR="$C_RED"
+                elif [ "$TEMP_C" -ge 75 ] 2>/dev/null; then
+                    STATUS="WARN"
+                    COLOR="$C_YELLOW"
+                fi
+
+                printf '  %-25s %s%s C%s\n' \
+                    "$NAME temperature" "$COLOR" "$TEMP_C" "$C_RESET"
+                printf '  %-25s %s%s%s\n' \
+                    "Temperature status" "$COLOR" "$STATUS" "$C_RESET"
+                ;;
+        esac
+    done
+
+    if [ "$FOUND" -eq 0 ]; then
+        skip "Hardware telemetry not exposed by this platform"
+    else
+        info "Power telemetry is reported from hwmon and is not labeled as PoE negotiation unless explicit PoE/PSE telemetry is exposed."
+    fi
+}
+
+# ================================================================
 # REBOOT / CRASH EVIDENCE
 # ================================================================
 
@@ -2567,30 +2702,134 @@ report_reboot_crash() {
 # those fields. Otherwise it safely reports capability unavailable.
 # ================================================================
 
+get_proc_cpu_mem() {
+
+    PID="$1"
+
+    [ -r "/proc/$PID/stat" ] || return 1
+    [ -r "/proc/$PID/status" ] || return 1
+
+    STAT1="$(cat "/proc/$PID/stat" 2>/dev/null)"
+    UPTIME1="$(awk '{print $1}' /proc/uptime 2>/dev/null)"
+
+    [ -n "$STAT1" ] || return 1
+    [ -n "$UPTIME1" ] || return 1
+
+    CLK_TCK=100
+    if getconf >/dev/null 2>&1; then
+        VALUE="$(getconf CLK_TCK 2>/dev/null)"
+        case "$VALUE" in
+            ''|*[!0-9]*) ;;
+            *) CLK_TCK="$VALUE" ;;
+        esac
+    fi
+
+    # Parse /proc/<pid>/stat safely around the command name parentheses.
+    CPU1="$(printf '%s\n' "$STAT1" | awk -v c="$CLK_TCK" 'BEGIN{FS=" ";} {print ($14+$15)/c}')"
+
+    sleep 1
+
+    STAT2="$(cat "/proc/$PID/stat" 2>/dev/null)"
+    UPTIME2="$(awk '{print $1}' /proc/uptime 2>/dev/null)"
+
+    [ -n "$STAT2" ] || return 1
+    [ -n "$UPTIME2" ] || return 1
+
+    CPU2="$(printf '%s\n' "$STAT2" | awk -v c="$CLK_TCK" 'BEGIN{FS=" ";} {print ($14+$15)/c}')"
+
+    CPU_PCT="$(awk -v c1="$CPU1" -v c2="$CPU2" -v t1="$UPTIME1" -v t2="$UPTIME2" \
+        'BEGIN {dt=t2-t1; dc=c2-c1; if(dt>0) printf "%.1f", (dc/dt)*100; else print "0.0"}')"
+
+    RSS_KB="$(awk '/^VmRSS:/ {print $2; exit}' "/proc/$PID/status" 2>/dev/null)"
+    THREADS="$(awk '/^Threads:/ {print $2; exit}' "/proc/$PID/status" 2>/dev/null)"
+
+    [ -n "$CPU_PCT" ] || CPU_PCT="N/A"
+    [ -n "$RSS_KB" ] || RSS_KB="N/A"
+    [ -n "$THREADS" ] || THREADS="N/A"
+
+    RSS_MB="N/A"
+    case "$RSS_KB" in
+        ''|*[!0-9]*) ;;
+        *) RSS_MB="$(awk -v k="$RSS_KB" 'BEGIN {printf "%.1f",k/1024}')" ;;
+    esac
+
+    printf '%s|%s|%s\n' "$CPU_PCT" "$RSS_MB" "$THREADS"
+    return 0
+}
+
+get_pid_by_name() {
+
+    PROC="$1"
+
+    if have pgrep; then
+        pgrep -f "$PROC" 2>/dev/null | head -n 1
+        return
+    fi
+
+    ps w 2>/dev/null |
+        grep -v grep |
+        grep "$PROC" |
+        awk 'NR==1 {print $1; exit}'
+}
+
 report_process_resources() {
 
-    section "PROCESS RESOURCE HEALTH"
+    section_wide "PROCESS RESOURCE HEALTH"
 
-    if ! have ps; then
-        skip "ps is not installed"
-        return
-    fi
+    printf '  %-24s %-9s %-12s %-9s %s\n' \
+        "PROCESS" "CPU" "RSS" "THREADS" "STATUS"
 
-    PS_HEADER="$(ps w 2>/dev/null | head -n 1)"
+    printf '  %-24s %-9s %-12s %-9s %s\n' \
+        "------------------------" "---------" "------------" "---------" "----------"
 
-    if ! printf '%s\n' "$PS_HEADER" | grep -Eq 'CPU|%CPU|MEM|%MEM'; then
-        skip "Process CPU/memory columns not exposed by this platform"
-        return
-    fi
+    FOUND=0
 
-    printf '  %-22s %s\n' "PROCESS RESOURCE DATA" "$PS_HEADER"
+    for P in hostapd dnsmasq dashboard_controller connkeeper udshape udsplash anyip juggler; do
 
-    for P in hostapd dnsmasq udshape udsplash juggler; do
-        LINE="$(ps w 2>/dev/null | grep " $P" | grep -v grep | head -n 1)"
-        if [ -n "$LINE" ]; then
-            printf '  %s\n' "$LINE"
+        PID="$(get_pid_by_name "$P")"
+        [ -n "$PID" ] || continue
+
+        FOUND=1
+
+        DATA="$(get_proc_cpu_mem "$PID")"
+
+        if [ -z "$DATA" ]; then
+            printf '  %-24s %-9s %-12s %-9s %s%s%s\n' \
+                "$P" "N/A" "N/A" "N/A" "$C_DIM" "UNAVAILABLE" "$C_RESET"
+            continue
         fi
+
+        CPU="${DATA%%|*}"
+        REST="${DATA#*|}"
+        RSS="${REST%%|*}"
+        THREADS="${REST#*|}"
+
+        STATUS="OK"
+        COLOR="$C_GREEN"
+
+        if [ "$CPU" != "N/A" ] && awk -v c="$CPU" 'BEGIN{exit !(c>=50)}'; then
+            STATUS="HIGH"
+            COLOR="$C_RED"
+        elif [ "$CPU" != "N/A" ] && awk -v c="$CPU" 'BEGIN{exit !(c>=20)}'; then
+            STATUS="WARN"
+            COLOR="$C_YELLOW"
+        fi
+
+        if [ "$RSS" != "N/A" ] && awk -v m="$RSS" 'BEGIN{exit !(m>=128)}'; then
+            if [ "$STATUS" = "OK" ]; then
+                STATUS="WARN"
+                COLOR="$C_YELLOW"
+            fi
+        fi
+
+        printf '  %-24s %-9s %-12s %-9s ' \
+            "$P" "${CPU}%" "${RSS} MB" "$THREADS"
+        printf '%s%s%s\n' "$COLOR" "$STATUS" "$C_RESET"
+
     done
+
+    [ "$FOUND" -eq 1 ] ||
+        skip "No monitored processes found or /proc process data unavailable"
 }
 
 # ================================================================
@@ -2692,6 +2931,7 @@ report_wired
 report_ethernet_errors
 report_link_stability
 report_power_poe
+report_hardware_telemetry
 report_ip
 report_connectivity
 report_internet_quality
