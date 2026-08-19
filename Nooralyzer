@@ -1,7 +1,7 @@
 #!/bin/sh
 
 # ================================================================
-# NOORALYZER v1.7
+# NOORALYZER v1.6
 # DNET AP Diagnostic & Troubleshooting Tool
 #
 # Read-only diagnostics for Datto/Kaseya Networking APs
@@ -63,108 +63,24 @@ binary_exists() {
     [ -x "/sbin/$1" ]
 }
 
-# Section metadata. Actual rendering is performed by run_panel() so every
-# diagnostic section gets a clean, fully enclosed box while preserving the
-# existing diagnostic output and colors.
-PANEL_TITLE=""
-PANEL_HINT="normal"
-
+# Standard 70-character section
 section() {
-    PANEL_TITLE="$1"
-    PANEL_HINT="normal"
+    printf '\n%s+----------------------------------------------------------------------+%s\n' \
+        "$C_CYAN" "$C_RESET"
+    printf '%s| %-68s |%s\n' \
+        "$C_CYAN" "$1" "$C_RESET"
+    printf '%s+----------------------------------------------------------------------+%s\n' \
+        "$C_CYAN" "$C_RESET"
 }
 
+# Wide section used only for tables that genuinely need more room
 section_wide() {
-    PANEL_TITLE="$1"
-    PANEL_HINT="wide"
-}
-
-repeat_char() {
-    CHAR="$1"
-    COUNT="$2"
-
-    [ "$COUNT" -gt 0 ] 2>/dev/null || return 0
-    printf '%*s' "$COUNT" '' | tr ' ' "$CHAR"
-}
-
-strip_ansi() {
-    ESC="$(printf '\033')"
-    sed "s/${ESC}\[[0-9;]*m//g"
-}
-
-panel_visual_length() {
-    printf '%s' "$1" | strip_ansi | awk '{print length}'
-}
-
-render_panel() {
-    FILE="$1"
-    TITLE="$PANEL_TITLE"
-
-    [ -f "$FILE" ] || return 0
-
-    WIDTH=0
-    TITLE_LEN="$(panel_visual_length "$TITLE")"
-
-    if [ "$TITLE_LEN" -gt "$WIDTH" ] 2>/dev/null; then
-        WIDTH="$TITLE_LEN"
-    fi
-
-    while IFS= read -r LINE || [ -n "$LINE" ]; do
-        LEN="$(panel_visual_length "$LINE")"
-        if [ "$LEN" -gt "$WIDTH" ] 2>/dev/null; then
-            WIDTH="$LEN"
-        fi
-    done < "$FILE"
-
-    # Keep the compact sections compact while allowing wide diagnostic
-    # tables (SSID, client quality, process resources, etc.) to breathe.
-    if [ "$PANEL_HINT" = "wide" ] && [ "$WIDTH" -lt 112 ] 2>/dev/null; then
-        WIDTH=112
-    elif [ "$WIDTH" -lt 68 ] 2>/dev/null; then
-        WIDTH=68
-    fi
-
-    BORDER_LEN=$((WIDTH + 2))
-    RULE="$(repeat_char '-' "$BORDER_LEN")"
-
-    printf '\n%s+%s+%s\n' "$C_CYAN" "$RULE" "$C_RESET"
-
-    TITLE_PAD=$((WIDTH - TITLE_LEN))
-    [ "$TITLE_PAD" -lt 0 ] && TITLE_PAD=0
-
-    printf '%s| %s%*s |%s\n' \
-        "$C_CYAN" "$TITLE" "$TITLE_PAD" '' "$C_RESET"
-
-    printf '%s+%s+%s\n' "$C_CYAN" "$RULE" "$C_RESET"
-
-    while IFS= read -r LINE || [ -n "$LINE" ]; do
-        LEN="$(panel_visual_length "$LINE")"
-        PAD=$((WIDTH - LEN))
-        [ "$PAD" -lt 0 ] && PAD=0
-
-        printf '%s| %s%*s |%s\n' \
-            "$C_CYAN" "$LINE" "$PAD" '' "$C_RESET"
-    done < "$FILE"
-
-    printf '%s+%s+%s\n' "$C_CYAN" "$RULE" "$C_RESET"
-}
-
-run_panel() {
-    FUNC="$1"
-    PANEL_FILE="${TMP_BASE}_panel_${FUNC}"
-
-    PANEL_TITLE=""
-    PANEL_HINT="normal"
-
-    "$FUNC" > "$PANEL_FILE" 2>&1
-
-    if [ -n "$PANEL_TITLE" ]; then
-        render_panel "$PANEL_FILE"
-    else
-        cat "$PANEL_FILE"
-    fi
-
-    rm -f "$PANEL_FILE" 2>/dev/null
+    printf '\n%s+----------------------------------------------------------------------------------------------------------------+%s\n' \
+        "$C_CYAN" "$C_RESET"
+    printf '%s| %-112s |%s\n' \
+        "$C_CYAN" "$1" "$C_RESET"
+    printf '%s+----------------------------------------------------------------------------------------------------------------+%s\n' \
+        "$C_CYAN" "$C_RESET"
 }
 
 kv() {
@@ -3010,33 +2926,33 @@ printf '  Mode               : Diagnose . Detect . Troubleshoot\n'
 # RUN DIAGNOSTICS
 # ================================================================
 
-run_panel report_system
-run_panel report_wired
-run_panel report_ethernet_errors
-run_panel report_link_stability
-run_panel report_power_poe
-run_panel report_hardware_telemetry
-run_panel report_ip
-run_panel report_connectivity
-run_panel report_internet_quality
-run_panel report_dns_latency
-run_panel report_mtu
-run_panel report_network_state
-run_panel report_management
-run_panel report_dhcp_bridge
-run_panel report_dhcp_leases
-run_panel report_processes
-run_panel report_process_resources
-run_panel report_logs
-run_panel report_reboot_crash
-run_panel report_time_ntp
-run_panel report_radios
-run_panel radio_busy_time
-run_panel report_ssid_interfaces
-run_panel report_clients
-run_panel report_client_quality
-run_panel report_per_client_health
-run_panel report_summary
+report_system
+report_wired
+report_ethernet_errors
+report_link_stability
+report_power_poe
+report_hardware_telemetry
+report_ip
+report_connectivity
+report_internet_quality
+report_dns_latency
+report_mtu
+report_network_state
+report_management
+report_dhcp_bridge
+report_dhcp_leases
+report_processes
+report_process_resources
+report_logs
+report_reboot_crash
+report_time_ntp
+report_radios
+radio_busy_time
+report_ssid_interfaces
+report_clients
+report_client_quality
+report_per_client_health
+report_summary
 
 # ================================================================
 # COMPLETE
