@@ -143,7 +143,7 @@ render_panel() {
         [ "$PAD" -lt 0 ] && PAD=0
 
         printf '%s| %s%*s |%s\n' \
-            "$C_CYAN" "$LINE" "$PAD" '' "$C_RESET"
+            "$C_WHITE" "$LINE" "$PAD" '' "$C_RESET"
     done < "$FILE"
 
     printf '%s+%s+%s\n' "$C_CYAN" "$RULE" "$C_RESET"
