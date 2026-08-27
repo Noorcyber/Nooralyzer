@@ -3,7 +3,7 @@
 # ================================================================
 # NOORALYZER v1.7
 # DNET AP Diagnostic & Troubleshooting Tool
-#
+# By Noor Shaheed
 # Read-only diagnostics for Datto/Kaseya Networking APs
 # ================================================================
 
@@ -2628,11 +2628,15 @@ report_client_quality() {
 
     section_wide "WI-FI CLIENT QUALITY"
 
-    printf '  %-7s %-9s %-8s %-12s %-12s %-10s %s\n' \
+    # Fixed-width columns keep long ESSIDs from pushing the remaining
+    # values (clients/RSSI/weak/retries/health) out of alignment.
+    # ESSID display is limited to 28 characters; diagnostic logic and
+    # the actual ESSID value remain unchanged.
+    printf '  %-28s %-9s %-8s %-12s %-8s %-10s %s\n' \
         "SSID" "IF" "CLIENTS" "AVG RSSI" "WEAK" "RETRIES" "HEALTH"
 
-    printf '  %-7s %-9s %-8s %-12s %-12s %-10s %s\n' \
-        "-------" "---------" "--------" "------------" "------------" "----------" "----------"
+    printf '  %-28s %-9s %-8s %-12s %-8s %-10s %s\n' \
+        "----------------------------" "---------" "--------" "------------" "--------" "----------" "----------"
 
     QUALITY_FILE="${TMP_BASE}_quality"
     get_ap_interfaces > "$QUALITY_FILE" 2>/dev/null
@@ -2650,9 +2654,14 @@ report_client_quality() {
         COUNT="$(count_clients "$INT")"
         [ -n "$COUNT" ] || COUNT=0
 
+        # Display-only ESSID field. This prevents long SSIDs from
+        # shifting subsequent columns while preserving the real value.
+        ESSID_DISPLAY="$(printf '%s\n' "$ESSID" | awk '{printf "%.28s", $0}')"
+        [ -n "$ESSID_DISPLAY" ] || ESSID_DISPLAY="N/A"
+
         if [ "$COUNT" -eq 0 ] 2>/dev/null; then
-            printf '  %-7s %-9s %-8s %-12s %-12s %-10s %s\n' \
-                "$ESSID" "$INT" "0" "N/A" "0" "0" "OK"
+            printf '  %-28s %-9s %-8s %-12s %-8s %-10s %s\n' \
+                "$ESSID_DISPLAY" "$INT" "0" "N/A" "0" "0" "OK"
             continue
         fi
 
@@ -2718,8 +2727,8 @@ EOF
             COLOR="$C_RED"
         fi
 
-        printf '  %-7s %-9s %-8s %-12s %-12s %-10s ' \
-            "$ESSID" "$INT" "$COUNT" "$AVG dBm" "$WEAK" "$RETRY_SUM"
+        printf '  %-28s %-9s %-8s %-12s %-8s %-10s ' \
+            "$ESSID_DISPLAY" "$INT" "$COUNT" "$AVG dBm" "$WEAK" "$RETRY_SUM"
         printf '%s%s%s\n' "$COLOR" "$HEALTH" "$C_RESET"
 
     done < "$QUALITY_FILE"
