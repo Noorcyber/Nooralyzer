@@ -1990,7 +1990,7 @@ report_client_details() {
 
 report_clients() {
 
-    section "WI-FI CLIENT HEALTH"
+    section "BSS SIGNAL/WI-FI CLIENT HEALTH"
 
     if ! have iw; then
         skip "iw is not installed"
